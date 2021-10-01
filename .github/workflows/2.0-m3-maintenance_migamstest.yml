@@ -49,5 +49,5 @@ jobs:
         with:
           app-name: 'migamstest'
           slot-name: 'Production'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_56EB3E03F6FC43D2B50D568999F47FEC }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_D3A2A51F76AF4A2C98F20A5312E6EA26 }}
           package: '*.jar'
