@@ -17,11 +17,9 @@
 package alfio.controller.api.v2.model;
 
 
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 
 @Getter
-@AllArgsConstructor
 public class AlfioInfo {
 
     private final boolean demoModeEnabled;
@@ -31,4 +29,26 @@ public class AlfioInfo {
     private final String globalPrivacyPolicyUrl;
     private final String globalTermsUrl;
     private final InvoicingConfiguration invoicingConfiguration;
+    private final String announcementBannerContentHTML;
+    private final WalletConfiguration walletConfiguration;
+
+    public AlfioInfo(boolean demoModeEnabled,
+                     boolean devModeEnabled,
+                     boolean prodModeEnabled,
+                     AnalyticsConfiguration analyticsConfiguration,
+                     String globalPrivacyPolicyUrl,
+                     String globalTermsUrl,
+                     InvoicingConfiguration invoicingConfiguration,
+                     String announcementBannerContentHTML,
+                     WalletConfiguration walletConfiguration) {
+        this.demoModeEnabled = demoModeEnabled;
+        this.devModeEnabled = devModeEnabled;
+        this.prodModeEnabled = prodModeEnabled;
+        this.analyticsConfiguration = analyticsConfiguration;
+        this.globalPrivacyPolicyUrl = globalPrivacyPolicyUrl;
+        this.globalTermsUrl = globalTermsUrl;
+        this.invoicingConfiguration = invoicingConfiguration;
+        this.announcementBannerContentHTML = announcementBannerContentHTML;
+        this.walletConfiguration = walletConfiguration;
+    }
 }

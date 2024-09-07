@@ -28,8 +28,6 @@ import alfio.model.modification.support.LocationDescriptor;
 import alfio.model.result.ErrorCode;
 import alfio.model.result.Result;
 import alfio.model.result.ValidationResult;
-import lombok.AllArgsConstructor;
-import lombok.RequiredArgsConstructor;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
@@ -40,16 +38,23 @@ import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Function;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 import static org.apache.commons.lang3.StringUtils.isAnyBlank;
 
 public final class Validator {
 
     // source: https://commons.apache.org/proper/commons-validator/apidocs/src-html/org/apache/commons/validator/routines/EmailValidator.html
-    private static final Pattern SIMPLE_E_MAIL_PATTERN = Pattern.compile("^\\s*?(.+)@(.+?)\\s*$");
+    private static final Pattern SIMPLE_E_MAIL_PATTERN = Pattern.compile("^\\p{javaLetterOrDigit}[^\\s@]*@\\p{javaLetterOrDigit}[^\\s]*$");
     // this regex validates the e-mail to be a canonical address (i.e. test@example.org)
-    private static final Pattern CANONICAL_MAIL_VALIDATOR = Pattern.compile("^[^@\\s]+@[^@\\s]+(\\.[^@\\s]+)+$");
+    private static final Pattern CANONICAL_MAIL_VALIDATOR = Pattern.compile("^\\p{javaLetterOrDigit}[^\\s@]*@\\p{javaLetterOrDigit}[^\\s@]*\\.\\p{javaAlphabetic}{2,}$");
+    private static final String ERROR_DESCRIPTION = "error.description";
+    private static final String EMAIL_KEY = "email";
+    private static final String ERROR_EMAIL = "error.email";
+    private static final String FIRST_NAME = "firstName";
+    private static final String LAST_NAME = "lastName";
+    private static final String FULL_NAME = "fullName";
+    private static final String ADDITIONAL_PREFIX = "additional[";
+    private static final String ADDITIONAL_SERVICES = "additionalServices";
 
     private Validator() {
     }
@@ -76,7 +81,7 @@ public final class Validator {
         var descriptions = ev.getDescription();
 
         if(descriptions == null || descriptions.values().stream().anyMatch(v -> v == null || v.isBlank() || v.length() > descriptionMaxLength)) {
-            errors.rejectValue("description", "error.description");
+            errors.rejectValue("description", ERROR_DESCRIPTION);
         }
 
         ValidationUtils.rejectIfEmptyOrWhitespace(errors, "termsAndConditionsUrl", "error.termsandconditionsurl");
@@ -160,7 +165,7 @@ public final class Validator {
             errors.rejectValue(prefix + "expiration", "error.date.overflow");
         }
         if(isCategoryDescriptionTooLong(category, descriptionMaxLength)) {
-            errors.rejectValue(prefix + "description", "error.description");
+            errors.rejectValue(prefix + "description", ERROR_DESCRIPTION);
         }
         return evaluateValidationResult(errors);
     }
@@ -191,7 +196,7 @@ public final class Validator {
         if (errors.hasFieldErrors()) {
             return ValidationResult.failed(errors.getFieldErrors()
                     .stream().map(ValidationResult.ErrorDescriptor::fromFieldError)
-                    .collect(Collectors.toList()));
+                    .toList());
         }
         return ValidationResult.success();
     }
@@ -209,7 +214,6 @@ public final class Validator {
         return evaluateValidationResult(errors);
     }
 
-    @AllArgsConstructor
     public static class TicketFieldsFilterer {
 
         private final List<TicketFieldConfiguration> additionalFieldsForEvent;
@@ -217,23 +221,33 @@ public final class Validator {
         private final Set<Integer> additionalServiceIds;
         private final Optional<Ticket> firstTicketInReservation;
 
+        public TicketFieldsFilterer(List<TicketFieldConfiguration> additionalFieldsForEvent,
+                                    Function<String, Integer> fromTicketUUIDToTicketCategoryId,
+                                    Set<Integer> additionalServiceIds,
+                                    Optional<Ticket> firstTicketInReservation) {
+            this.additionalFieldsForEvent = additionalFieldsForEvent;
+            this.fromTicketUUIDToTicketCategoryId = fromTicketUUIDToTicketCategoryId;
+            this.additionalServiceIds = additionalServiceIds;
+            this.firstTicketInReservation = firstTicketInReservation;
+        }
+
 
         public List<TicketFieldConfiguration> getFieldsForTicket(String ticketUUID) {
             var isFirstTicket = firstTicketInReservation.map(first -> ticketUUID.equals(first.getUuid())).orElse(false);
             return filterFieldsForTicket(additionalFieldsForEvent, fromTicketUUIDToTicketCategoryId.apply(ticketUUID), additionalServiceIds, isFirstTicket);
         }
+
+        private static List<TicketFieldConfiguration> filterFieldsForTicket(List<TicketFieldConfiguration> additionalFieldsForEvent,
+                                                                            Integer ticketCategoryId,
+                                                                            Set<Integer> additionalServiceIds,
+                                                                            boolean isFirstTicket) {
+            return additionalFieldsForEvent.stream()
+                .filter(field -> field.rulesApply(ticketCategoryId))
+                .filter(f -> f.getContext() == TicketFieldConfiguration.Context.ATTENDEE || (isFirstTicket && Optional.ofNullable(f.getAdditionalServiceId()).filter(additionalServiceIds::contains).isPresent()))
+                .toList();
+        }
     }
 
-
-    private static List<TicketFieldConfiguration> filterFieldsForTicket(List<TicketFieldConfiguration> additionalFieldsForEvent,
-                                                                       Integer ticketCategoryId,
-                                                                       Set<Integer> additionalServiceIds,
-                                                                       boolean isFirstTicket) {
-        return additionalFieldsForEvent.stream()
-            .filter(field -> field.rulesApply(ticketCategoryId))
-            .filter(f -> f.getContext() == TicketFieldConfiguration.Context.ATTENDEE || (isFirstTicket && Optional.ofNullable(f.getAdditionalServiceId()).filter(additionalServiceIds::contains).isPresent()))
-            .collect(Collectors.toList());
-    }
 
     public static ValidationResult validateTicketAssignment(UpdateTicketOwnerForm form,
                                                             List<TicketFieldConfiguration> additionalFieldsForTicket,
@@ -252,85 +266,90 @@ public final class Validator {
         }
 
         Errors errors = errorsOptional.get();
-        ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + "email", "error.email");
+        ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + EMAIL_KEY, ERROR_EMAIL);
         String email = form.getEmail();
         if(!isEmailValid(email)) {
-            errors.rejectValue(prefix + "email", "error.email");
+            errors.rejectValue(prefix + EMAIL_KEY, ERROR_EMAIL);
         }
 
         if(event.mustUseFirstAndLastName()) {
-            ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + "firstName", ErrorsCode.STEP_2_EMPTY_FIRSTNAME);
-            validateMaxLength(form.getFirstName(), prefix + "firstName", ErrorsCode.STEP_2_MAX_LENGTH_FIRSTNAME, 255, errors);
+            ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + FIRST_NAME, ErrorsCode.STEP_2_EMPTY_FIRSTNAME);
+            validateMaxLength(form.getFirstName(), prefix + FIRST_NAME, ErrorsCode.STEP_2_MAX_LENGTH_FIRSTNAME, 255, errors);
 
-            ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + "lastName", ErrorsCode.STEP_2_EMPTY_LASTNAME);
-            validateMaxLength(form.getLastName(), prefix + "lastName", ErrorsCode.STEP_2_MAX_LENGTH_LASTNAME, 255, errors);
+            ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + LAST_NAME, ErrorsCode.STEP_2_EMPTY_LASTNAME);
+            validateMaxLength(form.getLastName(), prefix + LAST_NAME, ErrorsCode.STEP_2_MAX_LENGTH_LASTNAME, 255, errors);
         } else {
-            ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + "fullName", ErrorsCode.STEP_2_EMPTY_FULLNAME);
-            validateMaxLength(form.getFullName(), prefix + "fullName", ErrorsCode.STEP_2_MAX_LENGTH_FULLNAME, 255, errors);
+            ValidationUtils.rejectIfEmptyOrWhitespace(errors, prefix + FULL_NAME, ErrorsCode.STEP_2_EMPTY_FULLNAME);
+            validateMaxLength(form.getFullName(), prefix + FULL_NAME, ErrorsCode.STEP_2_MAX_LENGTH_FULLNAME, 255, errors);
         }
 
 
         //
         final String prefixForLambda = prefix;
         for(TicketFieldConfiguration fieldConf : additionalFieldsForTicket) {
-
-            boolean isField = form.getAdditional() !=null && form.getAdditional().containsKey(fieldConf.getName());
-
-            if(!isField) {
-                if (fieldConf.isRequired()) { // sometimes the field is not propagated, so, if it's required, we need to do some additional work
-                    if (form.getAdditional() == null) {
-                        form.setAdditional(new HashMap<>());
-                    }
-                    form.getAdditional().put(fieldConf.getName(), Collections.singletonList(""));
-                    errors.rejectValue(prefixForLambda + "additional["+fieldConf.getName()+"][0]", ErrorsCode.EMPTY_FIELD);
-                }
-                continue;
-            }
-            
-            List<String> values = Optional.ofNullable(form.getAdditional().get(fieldConf.getName())).orElse(Collections.emptyList());
-
-            //handle required for multiple choice (checkbox) where required is interpreted as at least one!
-            if (fieldConf.isRequired() && fieldConf.getCount() > 1  && values.stream().allMatch(StringUtils::isBlank)) {
-                errors.rejectValue(prefixForLambda + "additional["+fieldConf.getName()+"]", ErrorsCode.EMPTY_FIELD);
-            }
-
-            for(int i = 0; i < values.size(); i++) {
-                String formValue = values.get(i);
-                if(fieldConf.isMaxLengthDefined()) {
-                    validateMaxLength(formValue, prefixForLambda + "additional["+fieldConf.getName()+"]["+i+"]", "error.tooLong", fieldConf.getMaxLength(), errors);
-                }
-
-                if(StringUtils.isNotBlank(formValue) && fieldConf.isMinLengthDefined() && StringUtils.length(formValue) < fieldConf.getMinLength()) {
-                    errors.rejectValue(prefixForLambda + "additional["+fieldConf.getName()+"]["+i+"]", "error.tooShort", new Object[] { fieldConf.getMinLength() }, null);
-                }
-
-                if(!fieldConf.getRestrictedValues().isEmpty()) {
-                    validateRestrictedValue(formValue, prefixForLambda + "additional["+fieldConf.getName()+"]["+i+"]",
-                        "error.restrictedValue", fieldConf.getRestrictedValues(), errors);
-                }
-
-                if(fieldConf.isRequired() && fieldConf.getCount() == 1 && StringUtils.isBlank(formValue)){
-                    errors.rejectValue(prefixForLambda + "additional["+fieldConf.getName()+"]["+i+"]", ErrorsCode.EMPTY_FIELD);
-                }
-
-                if(fieldConf.hasDisabledValues() && fieldConf.getDisabledValues().contains(formValue)) {
-                    errors.rejectValue(prefixForLambda + "additional["+fieldConf.getName()+"]["+i+"]",
-                        "error.disabledValue", null, null);
-                }
-
-                try {
-                    if (fieldConf.isEuVat() && !vatValidator.test(formValue)) {
-                        errors.rejectValue(prefixForLambda + "additional[" + fieldConf.getName() + "]["+i+"]", ErrorsCode.STEP_2_INVALID_VAT);
-                    }
-                } catch (IllegalStateException e) {
-                    errors.rejectValue(prefixForLambda + "additional[" + fieldConf.getName() + "]["+i+"]", ErrorsCode.VIES_IS_DOWN);
-                }
-            }
-
-
+            validateFieldConfiguration(form, vatValidator, errors, prefixForLambda, fieldConf);
         }
 
         return evaluateValidationResult(errors);
+    }
+
+    private static void validateFieldConfiguration(UpdateTicketOwnerForm form, SameCountryValidator vatValidator, Errors errors, String prefixForLambda, TicketFieldConfiguration fieldConf) {
+        boolean isField = form.getAdditional() != null && form.getAdditional().containsKey(fieldConf.getName());
+
+        if(!isField) {
+            if (fieldConf.isRequired()) { // sometimes the field is not propagated, so, if it's required, we need to do some additional work
+                if (form.getAdditional() == null) {
+                    form.setAdditional(new HashMap<>());
+                }
+                form.getAdditional().put(fieldConf.getName(), Collections.singletonList(""));
+                errors.rejectValue(prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName()+"][0]", ErrorsCode.EMPTY_FIELD);
+            }
+            return;
+        }
+
+        List<String> values = Optional.ofNullable(form.getAdditional().get(fieldConf.getName())).orElse(Collections.emptyList());
+
+        //handle required for multiple choice (checkbox) where required is interpreted as at least one!
+        if (fieldConf.isRequired() && fieldConf.getCount() > 1  && values.stream().allMatch(StringUtils::isBlank)) {
+            errors.rejectValue(prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName()+"]", ErrorsCode.EMPTY_FIELD);
+        }
+
+        for(int i = 0; i < values.size(); i++) {
+            validateFieldValue(vatValidator, errors, prefixForLambda, fieldConf, values, i);
+        }
+    }
+
+    private static void validateFieldValue(SameCountryValidator vatValidator, Errors errors, String prefixForLambda, TicketFieldConfiguration fieldConf, List<String> values, int i) {
+        String formValue = values.get(i);
+        if(fieldConf.isMaxLengthDefined()) {
+            validateMaxLength(formValue, prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName()+"]["+ i +"]", "error.tooLong", fieldConf.getMaxLength(), errors);
+        }
+
+        if(StringUtils.isNotBlank(formValue) && fieldConf.isMinLengthDefined() && StringUtils.length(formValue) < fieldConf.getMinLength()) {
+            errors.rejectValue(prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName()+"]["+ i +"]", "error.tooShort", new Object[] { fieldConf.getMinLength() }, null);
+        }
+
+        if(!fieldConf.getRestrictedValues().isEmpty()) {
+            validateRestrictedValue(formValue, prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName()+"]["+ i +"]",
+                "error.restrictedValue", fieldConf.getRestrictedValues(), errors);
+        }
+
+        if(fieldConf.isRequired() && fieldConf.getCount() == 1 && StringUtils.isBlank(formValue)){
+            errors.rejectValue(prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName()+"]["+ i +"]", ErrorsCode.EMPTY_FIELD);
+        }
+
+        if(fieldConf.hasDisabledValues() && fieldConf.getDisabledValues().contains(formValue)) {
+            errors.rejectValue(prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName()+"]["+ i +"]",
+                "error.disabledValue", null, null);
+        }
+
+        try {
+            if (fieldConf.isEuVat() && !vatValidator.test(formValue)) {
+                errors.rejectValue(prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName() + "]["+ i +"]", ErrorsCode.STEP_2_INVALID_VAT);
+            }
+        } catch (IllegalStateException e) {
+            errors.rejectValue(prefixForLambda + ADDITIONAL_PREFIX + fieldConf.getName() + "]["+ i +"]", ErrorsCode.VIES_IS_DOWN);
+        }
     }
 
     private static void validateRestrictedValue(String value, String fieldName, String errorCode, List<String> restrictedValues, Errors errors) {
@@ -367,18 +386,18 @@ public final class Validator {
         }
 
         if(event.mustUseFirstAndLastName()) {
-            ValidationUtils.rejectIfEmptyOrWhitespace(errors, "firstName", "error.firstname");
-            validateMaxLength(form.getFirstName(), "firstName", "error.firstname", 255, errors);
+            ValidationUtils.rejectIfEmptyOrWhitespace(errors, FIRST_NAME, "error.firstname");
+            validateMaxLength(form.getFirstName(), FIRST_NAME, "error.firstname", 255, errors);
 
-            ValidationUtils.rejectIfEmptyOrWhitespace(errors, "lastName", "lastname.fullname");
-            validateMaxLength(form.getLastName(), "lastName", "error.lastname", 255, errors);
+            ValidationUtils.rejectIfEmptyOrWhitespace(errors, LAST_NAME, "lastname.fullname");
+            validateMaxLength(form.getLastName(), LAST_NAME, "error.lastname", 255, errors);
         } else {
-            validateMaxLength(form.getFullName(), "fullName", "error.fullname", 255, errors);
-            ValidationUtils.rejectIfEmptyOrWhitespace(errors, "fullName", "error.fullname");
+            validateMaxLength(form.getFullName(), FULL_NAME, "error.fullname", 255, errors);
+            ValidationUtils.rejectIfEmptyOrWhitespace(errors, FULL_NAME, "error.fullname");
         }
 
         if(!isEmailValid(form.getEmail())) {
-            errors.rejectValue("email", "error.email");
+            errors.rejectValue(EMAIL_KEY, ERROR_EMAIL);
         }
         if(form.getUserLanguage() == null) {
             errors.rejectValue("userLanguage", "error.userLanguage");
@@ -392,30 +411,30 @@ public final class Validator {
 
     public static ValidationResult validateAdditionalService(EventModification.AdditionalService additionalService, EventModification eventModification, Errors errors) {
         if(additionalService.isFixPrice() && Optional.ofNullable(additionalService.getPrice()).filter(p -> p.compareTo(BigDecimal.ZERO) >= 0).isEmpty()) {
-            errors.rejectValue("additionalServices", "error.price");
+            errors.rejectValue(ADDITIONAL_SERVICES, "error.price");
         }
 
         List<EventModification.AdditionalServiceText> descriptions = additionalService.getDescription();
         List<EventModification.AdditionalServiceText> titles = additionalService.getTitle();
         if(descriptions == null || titles == null || titles.size() != descriptions.size()) {
-            errors.rejectValue("additionalServices", "error.title");
-            errors.rejectValue("additionalServices", "error.description");
+            errors.rejectValue(ADDITIONAL_SERVICES, "error.title");
+            errors.rejectValue(ADDITIONAL_SERVICES, ERROR_DESCRIPTION);
         } else {
             if(!validateDescriptionList(titles) || !containsAllRequiredTranslations(eventModification, titles)) {
-                errors.rejectValue("additionalServices", "error.title");
+                errors.rejectValue(ADDITIONAL_SERVICES, "error.title");
             }
             if(!validateDescriptionList(descriptions) || !containsAllRequiredTranslations(eventModification, descriptions)) {
-                errors.rejectValue("additionalServices", "error.description");
+                errors.rejectValue(ADDITIONAL_SERVICES, ERROR_DESCRIPTION);
             }
         }
 
         DateTimeModification inception = additionalService.getInception();
         DateTimeModification expiration = additionalService.getExpiration();
         if(inception == null || expiration == null || expiration.isBefore(inception)) {
-            errors.rejectValue("additionalServices", "error.inception");
-            errors.rejectValue("additionalServices", "error.expiration");
+            errors.rejectValue(ADDITIONAL_SERVICES, "error.inception");
+            errors.rejectValue(ADDITIONAL_SERVICES, "error.expiration");
         } else if(eventModification != null && expiration.isAfter(eventModification.getEnd())) {
-            errors.rejectValue("additionalServices", "error.expiration");
+            errors.rejectValue(ADDITIONAL_SERVICES, "error.expiration");
         }
 
         return evaluateValidationResult(errors);
@@ -435,18 +454,26 @@ public final class Validator {
     }
 
     public static ValidationResult validateAdditionalFields(List<TicketFieldConfiguration> fieldConf, EventModification.AdditionalField field, Errors errors){
-        String duplicateName = fieldConf.stream().filter(f->f.getName().equalsIgnoreCase(field.getName())).map(TicketFieldConfiguration::getName).findAny().orElse("");
+        String duplicateName = fieldConf.stream().map(TicketFieldConfiguration::getName)
+            .filter(name -> name.equalsIgnoreCase(field.getName()))
+            .findAny()
+            .orElse("");
         if(StringUtils.isNotBlank(duplicateName)){
             errors.rejectValue("name", ErrorCode.DUPLICATE);
         }
         return evaluateValidationResult(errors);
     }
 
-    @RequiredArgsConstructor
+
     public static class AdvancedTicketAssignmentValidator implements Function<AdvancedValidationContext, Result<Void>> {
 
         private final SameCountryValidator vatValidator;
         private final GroupManager.WhitelistValidator whitelistValidator;
+
+        public AdvancedTicketAssignmentValidator(SameCountryValidator vatValidator, GroupManager.WhitelistValidator whitelistValidator) {
+            this.vatValidator = vatValidator;
+            this.whitelistValidator = whitelistValidator;
+        }
 
 
         @Override
@@ -462,18 +489,30 @@ public final class Validator {
 
             return new Result.Builder<Void>()
                 .checkPrecondition(() -> vatNr.isEmpty() || vatValidator.test(vatNr.get()), ErrorCode.custom(ErrorsCode.STEP_2_INVALID_VAT, "additional['"+vatFieldName+"']"))
-                .checkPrecondition(() -> whitelistValidator.test(new GroupManager.WhitelistValidationItem(context.categoryId, context.updateTicketOwnerForm.getEmail())), ErrorCode.custom(ErrorsCode.STEP_2_WHITELIST_CHECK_FAILED, "email"))
+                .checkPrecondition(() -> whitelistValidator.test(new GroupManager.WhitelistValidationItem(context.categoryId, context.updateTicketOwnerForm.getEmail())), ErrorCode.custom(ErrorsCode.STEP_2_WHITELIST_CHECK_FAILED, EMAIL_KEY))
                 .build(() -> null);
         }
     }
 
-    @RequiredArgsConstructor
+
     public static class AdvancedValidationContext {
         private final UpdateTicketOwnerForm updateTicketOwnerForm;
         private final List<TicketFieldConfiguration> ticketFieldConfigurations;
         private final int categoryId;
         private final String ticketUuid;
         private final String prefix;
+
+        public AdvancedValidationContext(UpdateTicketOwnerForm updateTicketOwnerForm,
+                                         List<TicketFieldConfiguration> ticketFieldConfigurations,
+                                         int categoryId,
+                                         String ticketUuid,
+                                         String prefix) {
+            this.updateTicketOwnerForm = updateTicketOwnerForm;
+            this.ticketFieldConfigurations = ticketFieldConfigurations;
+            this.categoryId = categoryId;
+            this.ticketUuid = ticketUuid;
+            this.prefix = prefix;
+        }
     }
 
 }

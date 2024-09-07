@@ -17,13 +17,20 @@
 package alfio.controller.api.v1.admin;
 
 import alfio.extension.ExtensionService;
+import alfio.job.executor.AssignTicketToSubscriberJobExecutor;
 import alfio.manager.*;
+import alfio.manager.system.AdminJobManager;
 import alfio.manager.system.ConfigurationLevel;
 import alfio.manager.system.ConfigurationManager;
 import alfio.manager.user.UserManager;
-import alfio.model.*;
+import alfio.model.Event;
+import alfio.model.EventWithAdditionalInfo;
+import alfio.model.ExtensionSupport;
 import alfio.model.ExtensionSupport.ExtensionMetadataValue;
+import alfio.model.PromoCodeDiscount;
+import alfio.model.api.v1.admin.CheckInLogEntry;
 import alfio.model.api.v1.admin.EventCreationRequest;
+import alfio.model.api.v1.admin.LinkedSubscriptions;
 import alfio.model.group.Group;
 import alfio.model.modification.EventModification;
 import alfio.model.modification.LinkedGroupModification;
@@ -34,10 +41,10 @@ import alfio.model.system.ConfigurationKeys;
 import alfio.model.user.Organization;
 import alfio.repository.ExtensionRepository;
 import alfio.util.Json;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.validation.BeanPropertyBindingResult;
@@ -46,22 +53,22 @@ import org.springframework.web.bind.annotation.*;
 
 import java.security.Principal;
 import java.time.ZonedDateTime;
-import java.util.Collections;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static alfio.controller.api.admin.EventApiController.validateEvent;
+import static alfio.manager.system.AdminJobExecutor.JobName.ASSIGN_TICKETS_TO_SUBSCRIBERS;
+import static alfio.model.api.v1.admin.EventCreationRequest.findExistingCategory;
 import static org.apache.commons.lang3.StringUtils.isBlank;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 
 @RestController
 @RequestMapping("/api/v1/admin/event")
-@AllArgsConstructor
-@Log4j2
 public class EventApiV1Controller {
+
+    private static final Logger log = LoggerFactory.getLogger(EventApiV1Controller.class);
 
     private final EventManager eventManager;
     private final EventNameManager eventNameManager;
@@ -73,6 +80,34 @@ public class EventApiV1Controller {
     private final ExtensionService extensionService;
     private final ExtensionRepository extensionRepository;
     private final ConfigurationManager configurationManager;
+    private final AdminJobManager adminJobManager;
+    private final CheckInManager checkInManager;
+
+    public EventApiV1Controller(EventManager eventManager,
+                                EventNameManager eventNameManager,
+                                FileUploadManager fileUploadManager,
+                                FileDownloadManager fileDownloadManager,
+                                UserManager userManager,
+                                EventStatisticsManager eventStatisticsManager,
+                                GroupManager groupManager,
+                                ExtensionService extensionService,
+                                ExtensionRepository extensionRepository,
+                                ConfigurationManager configurationManager,
+                                AdminJobManager adminJobManager,
+                                CheckInManager checkInManager) {
+        this.eventManager = eventManager;
+        this.eventNameManager = eventNameManager;
+        this.fileUploadManager = fileUploadManager;
+        this.fileDownloadManager = fileDownloadManager;
+        this.userManager = userManager;
+        this.eventStatisticsManager = eventStatisticsManager;
+        this.groupManager = groupManager;
+        this.extensionService = extensionService;
+        this.extensionRepository = extensionRepository;
+        this.configurationManager = configurationManager;
+        this.adminJobManager = adminJobManager;
+        this.checkInManager = checkInManager;
+    }
 
     @PostMapping("/create")
     @Transactional
@@ -90,6 +125,7 @@ public class EventApiV1Controller {
             .checkPrecondition(() -> isNotBlank(request.getImageUrl()), ErrorCode.custom("invalid.imageUrl", "Invalid Image URL"))
             .checkPrecondition(() -> isNotBlank(request.getTimezone()), ErrorCode.custom("invalid.timezone", "Invalid Timezone"))
             .checkPrecondition(() -> isNotBlank(imageRef), ErrorCode.custom("invalid.image", "Image is either missing or too big (max 200kb)"))
+            .checkPrecondition(() -> validateCategoriesSalesPeriod(request), ErrorCode.custom("invalid.categories", "Ticket categories: sales period not compatible with event dates"))
             .checkPrecondition(() -> {
                 EventModification eventModification = request.toEventModification(organization, eventNameManager::generateShortName, imageRef);
                 errorsContainer.set(new BeanPropertyBindingResult(eventModification, "event"));
@@ -102,7 +138,7 @@ public class EventApiV1Controller {
             }, ErrorCode.lazy(() -> toErrorCode(errorsContainer.get())))
             //TODO all location validation
             //TODO language validation, for all the description the same languages
-            .build(() -> insertEvent(request, user, imageRef).map(Event::getShortName).orElseThrow(IllegalStateException::new));
+            .build(() -> insertEvent(request, user, imageRef).orElseThrow(IllegalStateException::new));
 
         if(result.isSuccess()) {
             return ResponseEntity.ok(result.getData());
@@ -110,6 +146,12 @@ public class EventApiV1Controller {
             return ResponseEntity.badRequest().body(Json.toJson(result.getErrors()));
         }
 
+    }
+
+    private boolean validateCategoriesSalesPeriod(EventCreationRequest request) {
+        var eventEnd = request.getEndDate();
+        return request.getTickets().getCategories().stream()
+            .allMatch(tc -> tc.getStartSellingDate().isBefore(tc.getEndSellingDate()) && tc.getEndSellingDate().isBefore(eventEnd));
     }
 
     private ErrorCode toErrorCode(Errors errors) {
@@ -152,13 +194,64 @@ public class EventApiV1Controller {
         String imageRef = fetchImage(request.getImageUrl());
 
         Result<String> result =  new Result.Builder<String>()
-            .build(() -> updateEvent(slug, request, user, imageRef).map(Event::getShortName).get());
+            .build(() -> updateEvent(slug, request, user, imageRef).map(Event::getShortName).orElseThrow());
 
         if(result.isSuccess()) {
             return ResponseEntity.ok(result.getData());
         } else {
             return ResponseEntity.badRequest().build();
         }
+    }
+
+    @GetMapping("/{slug}/subscriptions")
+    public ResponseEntity<LinkedSubscriptions> getLinkedSubscriptions(@PathVariable("slug") String slug, Principal user) {
+
+        var subscriptionIdsOptional = eventManager.getOptionalEventAndOrganizationIdByName(slug, user.getName())
+            .map(event -> retrieveLinkedSubscriptionsForEvent(slug, event.getId(), event.getOrganizationId()));
+
+        return ResponseEntity.of(subscriptionIdsOptional);
+    }
+
+    @PutMapping("/{slug}/subscriptions")
+    public ResponseEntity<LinkedSubscriptions> updateLinkedSubscriptions(@PathVariable("slug") String slug,
+                                                                         @RequestBody List<UUID> subscriptions,
+                                                                         Principal user) {
+        var eventOptional = eventManager.getOptionalByName(slug, user.getName());
+        if (eventOptional.isEmpty()) {
+            return ResponseEntity.badRequest().build();
+        }
+        var eventAndOrgId = eventOptional.get();
+        eventManager.updateLinkedSubscriptions(subscriptions, eventAndOrgId.getId(), eventAndOrgId.getOrganizationId());
+        return ResponseEntity.ok(retrieveLinkedSubscriptionsForEvent(slug, eventAndOrgId.getId(), eventAndOrgId.getOrganizationId()));
+    }
+
+    @PostMapping("/{slug}/generate-subscribers-tickets")
+    public ResponseEntity<Boolean> generateTicketsForSubscribers(@PathVariable("slug") String slug,
+                                                                 Principal user) {
+        return ResponseEntity.of(eventManager.getOptionalEventAndOrganizationIdByName(slug, user.getName()).map(eventAndOrganizationId -> {
+            Map<String, Object> params = Map.of(
+                AssignTicketToSubscriberJobExecutor.EVENT_ID, eventAndOrganizationId.getId(),
+                AssignTicketToSubscriberJobExecutor.ORGANIZATION_ID, eventAndOrganizationId.getOrganizationId(),
+                AssignTicketToSubscriberJobExecutor.FORCE_GENERATION, true
+            );
+            return adminJobManager.scheduleExecution(ASSIGN_TICKETS_TO_SUBSCRIBERS, params);
+        }));
+    }
+
+    @GetMapping("/{slug}/check-in-log")
+    public ResponseEntity<List<CheckInLogEntry>> checkInLog(@PathVariable("slug") String slug,
+                                                      Principal user) {
+        try {
+            return ResponseEntity.ok(checkInManager.retrieveLogEntries(slug, user.getName()));
+        } catch (Exception ex) {
+            log.error("Error while loading check-in log entries", ex);
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+
+    private LinkedSubscriptions retrieveLinkedSubscriptionsForEvent(String slug, int id, int organizationId) {
+        var subscriptionIds = eventManager.getLinkedSubscriptionIds(id, organizationId);
+        return new LinkedSubscriptions(slug, subscriptionIds);
     }
 
     private Optional<Event> updateEvent(String slug, EventCreationRequest request, Principal user, String imageRef) {
@@ -168,18 +261,22 @@ public class EventApiV1Controller {
         Event event = original.getEvent();
 
 
-        EventModification em = request.toEventModificationUpdate(original,organization,imageRef);
+        EventModification em = request.toEventModificationUpdate(original, organization, imageRef);
 
         eventManager.updateEventHeader(event, em, user.getName());
         eventManager.updateEventPrices(event, em, user.getName());
 
 
         if (em.getTicketCategories() != null && !em.getTicketCategories().isEmpty()) {
-            em.getTicketCategories().forEach(c ->
-                findCategoryByName(event, c.getName()).ifPresent(originalCategory ->
-                    eventManager.updateCategory(originalCategory.getId(), event.getId(), c, user.getName())
-                )
-            );
+            var existingCategories = original.getTicketCategories();
+            em.getTicketCategories().forEach(c -> {
+                var existingCategory = findExistingCategory(existingCategories, c.getName(), c.getId());
+                if (existingCategory.isPresent()) {
+                    eventManager.updateCategory(existingCategory.get().getId(), event.getId(), c, user.getName());
+                } else {
+                    eventManager.insertCategory(event.getId(), c, user.getName());
+                }
+            });
         }
 
 
@@ -188,26 +285,21 @@ public class EventApiV1Controller {
         return eventManager.getOptionalByName(slug,user.getName());
     }
 
-    private Optional<TicketCategory> findCategoryByName(Event event, String name) {
-        List<TicketCategory> categories = eventManager.loadTicketCategories(event);
-        return categories.stream().filter( oc -> oc.getName().equals(name)).findFirst();
-    }
-
-    private Optional<Event> insertEvent(EventCreationRequest request, Principal user, String imageRef) {
-        Organization organization = userManager.findUserOrganizations(user.getName()).get(0);
-        EventModification em = request.toEventModification(organization,eventNameManager::generateShortName,imageRef);
-        eventManager.createEvent(em, user.getName());
-        Optional<Event> event = eventManager.getOptionalByName(em.getShortName(),user.getName());
-
-        event.ifPresent(e -> {
+    private Optional<String> insertEvent(EventCreationRequest request, Principal user, String imageRef) {
+        try {
+            Organization organization = userManager.findUserOrganizations(user.getName()).get(0);
+            EventModification em = request.toEventModification(organization,eventNameManager::generateShortName,imageRef);
+            eventManager.createEvent(em, user.getName());
+            var eventWithStatistics = eventStatisticsManager.getEventWithAdditionalInfo(em.getShortName(),user.getName());
+            var event = eventWithStatistics.getEvent();
             Optional.ofNullable(request.getTickets().getPromoCodes()).ifPresent(promoCodes ->
                 promoCodes.forEach(pc -> //TODO add ref to categories
                     eventManager.addPromoCode(
                         pc.getName(),
-                        e.getId(),
+                        event.getId(),
                         organization.getId(),
-                        ZonedDateTime.of(pc.getValidFrom(),e.getZoneId()),
-                        ZonedDateTime.of(pc.getValidTo(),e.getZoneId()),
+                        ZonedDateTime.of(pc.getValidFrom(),event.getZoneId()),
+                        ZonedDateTime.of(pc.getValidTo(),event.getZoneId()),
                         pc.getDiscount(),
                         pc.getDiscountType(),
                         Collections.emptyList(),
@@ -215,7 +307,8 @@ public class EventApiV1Controller {
                         null,
                         null,
                         PromoCodeDiscount.CodeType.DISCOUNT,
-                        null
+                        null,
+                        pc.getDiscountType() != PromoCodeDiscount.DiscountType.PERCENTAGE ? event.getCurrency() : null
                     )
                 )
             );
@@ -227,16 +320,16 @@ public class EventApiV1Controller {
                     if(link.getRight().isPresent()) {
                         Group group = link.getRight().get();
                         EventCreationRequest.CategoryRequest categoryRequest = link.getLeft();
-                        findCategoryByName(e, categoryRequest.getName()).ifPresent(category -> {
+                        findExistingCategory(eventWithStatistics.getTicketCategories(), categoryRequest.getName(), categoryRequest.getId()).ifPresent(category -> {
                             EventCreationRequest.GroupLinkRequest groupLinkRequest = categoryRequest.getGroupLink();
                             LinkedGroupModification modification = new LinkedGroupModification(null,
                                 group.getId(),
-                                e.getId(),
+                                event.getId(),
                                 category.getId(),
                                 groupLinkRequest.getType(),
                                 groupLinkRequest.getMatchType(),
                                 groupLinkRequest.getMaxAllocation());
-                            groupManager.createLink(group.getId(), e.getId(), modification);
+                            groupManager.createLink(group.getId(), event.getId(), modification);
                         });
                     }
                 });
@@ -244,7 +337,7 @@ public class EventApiV1Controller {
                 request.getExtensionSettings().stream()
                     .collect(Collectors.groupingBy(EventCreationRequest.ExtensionSetting::getExtensionId))
                     .forEach((id,settings) -> {
-                        List<ExtensionSupport.ExtensionMetadataIdAndName> metadata = extensionService.getSingle(organization, e, id)
+                        List<ExtensionSupport.ExtensionMetadataIdAndName> metadata = extensionService.getSingle(organization, event, id)
                             .map(es -> extensionRepository.findAllParametersForExtension(es.getId()))
                             .orElseGet(Collections::emptyList);
 
@@ -257,14 +350,16 @@ public class EventApiV1Controller {
                                 return pair.getRight().isPresent();
                             })
                             .map(pair -> new ExtensionMetadataValue(pair.getRight().get().getId(), pair.getLeft().getValue()))
-                            .collect(Collectors.toList());
-                        extensionService.bulkUpdateEventSettings(organization, e, values);
+                            .toList();
+                        extensionService.bulkUpdateEventSettings(organization, event, values);
                     });
 
             }
-
-        });
-        return event;
+            return Optional.of(event.getShortName());
+        } catch (Exception ex) {
+            log.error("Error while inserting event", ex);
+            return Optional.empty();
+        }
     }
 
     private String fetchImage(String url) {
@@ -275,10 +370,4 @@ public class EventApiV1Controller {
             return null;
         }
     }
-
-
-
-
-
-
 }

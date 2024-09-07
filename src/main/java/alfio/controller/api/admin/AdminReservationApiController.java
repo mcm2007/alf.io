@@ -16,6 +16,8 @@
  */
 package alfio.controller.api.admin;
 
+import alfio.controller.api.support.BookingInfoTicket;
+import alfio.controller.api.support.BookingInfoTicketLoader;
 import alfio.controller.api.support.PageAndContent;
 import alfio.manager.*;
 import alfio.model.*;
@@ -24,9 +26,9 @@ import alfio.model.modification.AdminReservationModification;
 import alfio.model.result.ErrorCode;
 import alfio.model.result.Result;
 import alfio.model.subscription.SubscriptionWithUsageDetails;
-import lombok.AllArgsConstructor;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.lang3.tuple.Triple;
 import org.springframework.http.ResponseEntity;
@@ -44,7 +46,6 @@ import static alfio.util.FileUtil.sendPdf;
 
 @RequestMapping("/admin/api/reservation")
 @RestController
-@AllArgsConstructor
 public class AdminReservationApiController {
 
     private final AdminReservationManager adminReservationManager;
@@ -52,6 +53,21 @@ public class AdminReservationApiController {
     private final PurchaseContextManager purchaseContextManager;
     private final PurchaseContextSearchManager purchaseContextSearchManager;
     private final TicketReservationManager ticketReservationManager;
+    private final BookingInfoTicketLoader bookingInfoTicketLoader;
+
+    public AdminReservationApiController(AdminReservationManager adminReservationManager,
+                                         EventManager eventManager,
+                                         PurchaseContextManager purchaseContextManager,
+                                         PurchaseContextSearchManager purchaseContextSearchManager,
+                                         TicketReservationManager ticketReservationManager,
+                                         BookingInfoTicketLoader bookingInfoTicketLoader) {
+        this.adminReservationManager = adminReservationManager;
+        this.eventManager = eventManager;
+        this.purchaseContextManager = purchaseContextManager;
+        this.purchaseContextSearchManager = purchaseContextSearchManager;
+        this.ticketReservationManager = ticketReservationManager;
+        this.bookingInfoTicketLoader = bookingInfoTicketLoader;
+    }
 
     @PostMapping("/{purchaseContextType}/{publicIdentifier}/new")
     public Result<String> createNew(@PathVariable("purchaseContextType") PurchaseContextType purchaseContextType, @PathVariable("publicIdentifier") String publicIdentifier, @RequestBody AdminReservationModification reservation, Principal principal) {
@@ -190,9 +206,21 @@ public class AdminReservationApiController {
         );
     }
 
+    @GetMapping("/{purchaseContextType}/{publicIdentifier}/{reservationId}/tickets-with-additional-data")
+    public List<Integer> ticketsWithAdditionalData(@PathVariable("purchaseContextType") PurchaseContextType purchaseContextType,
+                                                   @PathVariable("publicIdentifier") String publicIdentifier,
+                                                   @PathVariable("reservationId") String reservationId) {
+
+        if(purchaseContextType != PurchaseContextType.event) {
+            return List.of();
+        }
+
+        return adminReservationManager.getTicketIdsWithAdditionalData(purchaseContextType, publicIdentifier, reservationId);
+    }
+
 
     @PostMapping("/event/{publicIdentifier}/{reservationId}/remove-tickets")
-    public Result<Boolean> removeTickets(@PathVariable("publicIdentifier") String publicIdentifier,
+    public Result<RemoveResult> removeTickets(@PathVariable("publicIdentifier") String publicIdentifier,
                                          @PathVariable("reservationId") String reservationId,
                                          @RequestBody RemoveTicketsModification toRemove,
                                          Principal principal) {
@@ -202,8 +230,14 @@ public class AdminReservationApiController {
             .map(Map.Entry::getKey)
             .collect(Collectors.toList());
 
-        adminReservationManager.removeTickets(publicIdentifier, reservationId, toRemove.getTicketIds(), toRefund, toRemove.getNotify(), toRemove.getIssueCreditNote(), principal.getName());
-        return Result.success(true);
+        boolean issueCreditNote = adminReservationManager.removeTickets(publicIdentifier,
+            reservationId,
+            toRemove.getTicketIds(),
+            toRefund,
+            toRemove.getNotify(),
+            toRemove.issueCreditNote,
+            principal.getName()).getData();
+        return Result.success(new RemoveResult(true, issueCreditNote));
     }
 
     @GetMapping("/{purchaseContextType}/{publicIdentifier}/{reservationId}/payment-info")
@@ -244,6 +278,21 @@ public class AdminReservationApiController {
         return adminReservationManager.getEmailsForReservation(purchaseContextType, publicIdentifier, reservationId, principal.getName());
     }
 
+    @GetMapping("/{purchaseContextType}/{publicIdentifier}/{reservationId}/ticket/{ticketId}/full-data")
+    public ResponseEntity<BookingInfoTicket> loadFullTicketData(@PathVariable("purchaseContextType") PurchaseContextType purchaseContextType,
+                                                                @PathVariable("publicIdentifier") String publicIdentifier,
+                                                                @PathVariable("reservationId") String reservationId,
+                                                                @PathVariable("ticketId") String ticketUUID) {
+        if(purchaseContextType != PurchaseContextType.event) {
+            return ResponseEntity.notFound().build();
+        }
+
+        return ResponseEntity.of(
+            adminReservationManager.loadFullTicketInfo(reservationId, publicIdentifier, ticketUUID)
+                .map(eventAndTicket -> bookingInfoTicketLoader.toBookingInfoTicket(eventAndTicket.getRight(), eventAndTicket.getLeft()))
+        );
+    }
+
     private TicketReservationDescriptor toReservationDescriptor(String reservationId, Triple<TicketReservation, List<Ticket>, PurchaseContext> triple) {
         List<SerializablePair<TicketCategory, List<Ticket>>> tickets = triple.getMiddle().stream().collect(Collectors.groupingBy(Ticket::getCategoryId)).entrySet().stream()
             .map(entry -> SerializablePair.of(eventManager.getTicketCategoryById(entry.getKey(), triple.getRight().event().orElseThrow().getId()), entry.getValue()))
@@ -264,7 +313,6 @@ public class AdminReservationApiController {
         return null;
     }
 
-    @RequiredArgsConstructor
     @Getter
     public static class TicketReservationDescriptor {
         private final TicketReservation reservation;
@@ -272,15 +320,38 @@ public class AdminReservationApiController {
         private final OrderSummary orderSummary;
         private final List<SerializablePair<TicketCategory, List<Ticket>>> ticketsByCategory;
         private final SubscriptionWithUsageDetails subscriptionDetails;
+
+        public TicketReservationDescriptor(TicketReservation reservation,
+                                           TicketReservationAdditionalInfo additionalInfo,
+                                           OrderSummary orderSummary,
+                                           List<SerializablePair<TicketCategory, List<Ticket>>> ticketsByCategory,
+                                           SubscriptionWithUsageDetails subscriptionDetails) {
+            this.reservation = reservation;
+            this.additionalInfo = additionalInfo;
+            this.orderSummary = orderSummary;
+            this.ticketsByCategory = ticketsByCategory;
+            this.subscriptionDetails = subscriptionDetails;
+        }
     }
 
-    @RequiredArgsConstructor
+
     @Getter
     public static class RemoveTicketsModification {
         private final List<Integer> ticketIds;
-        private Map<Integer, Boolean> refundTo;
+        private final Map<Integer, Boolean> refundTo;
         private final Boolean notify;
         private final Boolean issueCreditNote;
+
+        @JsonCreator
+        public RemoveTicketsModification(@JsonProperty("ticketIds") List<Integer> ticketIds,
+                                         @JsonProperty("refundTo") Map<Integer, Boolean> refundTo,
+                                         @JsonProperty("notify") Boolean notify,
+                                         @JsonProperty("issueCreditNote") Boolean issueCreditNote) {
+            this.ticketIds = ticketIds;
+            this.refundTo = refundTo;
+            this.notify = notify;
+            this.issueCreditNote = issueCreditNote;
+        }
 
         public Boolean getNotify() {
             return Boolean.TRUE.equals(notify);
@@ -291,9 +362,32 @@ public class AdminReservationApiController {
         }
     }
 
-    @RequiredArgsConstructor
     @Getter
     public static class RefundAmount {
         private final String amount;
+
+        @JsonCreator
+        public RefundAmount(@JsonProperty("amount") String amount) {
+            this.amount = amount;
+        }
+    }
+
+    public static class RemoveResult {
+
+        private final boolean success;
+        private final boolean creditNoteGenerated;
+
+        public RemoveResult(boolean success, boolean creditNoteGenerated) {
+            this.success = success;
+            this.creditNoteGenerated = creditNoteGenerated;
+        }
+
+        public boolean isSuccess() {
+            return success;
+        }
+
+        public boolean isCreditNoteGenerated() {
+            return creditNoteGenerated;
+        }
     }
 }

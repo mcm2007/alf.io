@@ -16,7 +16,7 @@
  */
 package alfio.controller.api.admin;
 
-import alfio.config.authentication.AuthenticationConstants;
+import alfio.config.authentication.support.AuthenticationConstants;
 import alfio.manager.system.ConfigurationManager;
 import alfio.manager.user.UserManager;
 import alfio.model.modification.OrganizationModification;
@@ -28,15 +28,14 @@ import alfio.util.ImageUtil;
 import alfio.util.Json;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.AllArgsConstructor;
 import lombok.Getter;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.util.StreamUtils;
 import org.springframework.web.bind.annotation.*;
@@ -55,13 +54,18 @@ import static org.apache.commons.lang3.StringUtils.trimToNull;
 
 @RestController
 @RequestMapping("/admin/api")
-@Log4j2
-@AllArgsConstructor
 public class UsersApiController {
+
+    private static final Logger log = LoggerFactory.getLogger(UsersApiController.class);
 
     private static final String OK = "OK";
     private final UserManager userManager;
     private final ConfigurationManager configurationManager;
+
+    public UsersApiController(UserManager userManager, ConfigurationManager configurationManager) {
+        this.userManager = userManager;
+        this.configurationManager = configurationManager;
+    }
 
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -78,19 +82,23 @@ public class UsersApiController {
 
     /**
      * This endpoint is intended only for external use. If a user is registered as "sponsor", then the answer will be "SPONSOR", otherwise "OPERATOR".
-     * @return "SPONSOR" or "OPERATOR", depending on current user's privileges.
+     * @return "SPONSOR", "SUPERVISOR", or "OPERATOR", depending on current user's privileges.
      */
     @GetMapping("/user-type")
     public String getLoggedUserType() {
-        return SecurityContextHolder.getContext()
+        var authorities = SecurityContextHolder.getContext()
             .getAuthentication()
             .getAuthorities()
             .stream()
-            .map(GrantedAuthority::getAuthority)
-            .map(s -> StringUtils.substringAfter(s, "ROLE_"))
-            .filter(AuthenticationConstants.SPONSOR::equals)
-            .findFirst()
-            .orElse(AuthenticationConstants.OPERATOR);
+            .map(ga -> StringUtils.substringAfter(ga.getAuthority(), "ROLE_"))
+            .collect(Collectors.toSet());
+        if (authorities.contains(AuthenticationConstants.SPONSOR)) {
+            return AuthenticationConstants.SPONSOR;
+        } else if (authorities.contains(AuthenticationConstants.SUPERVISOR)) {
+            return AuthenticationConstants.SUPERVISOR;
+        } else {
+            return AuthenticationConstants.OPERATOR;
+        }
     }
 
     @GetMapping("/user/details")
@@ -129,15 +137,15 @@ public class UsersApiController {
         Optional<User> userOptional = userManager.findOptionalEnabledUserByUsername(principal.getName())
             .filter(u -> userManager.isOwnerOfOrganization(u, request.organizationId));
         if(userOptional.isPresent()) {
-            userManager.bulkInsertApiKeys(request.organizationId, request.role, request.descriptions);
+            userManager.bulkInsertApiKeys(request.organizationId, request.role, request.descriptions, principal);
             return ResponseEntity.ok("OK");
         }
         return ResponseEntity.badRequest().build();
     }
 
     @PostMapping("/organizations/new")
-    public String insertOrganization(@RequestBody OrganizationModification om) {
-        userManager.createOrganization(om);
+    public String insertOrganization(@RequestBody OrganizationModification om, Principal principal) {
+        userManager.createOrganization(om, principal);
         return OK;
     }
 
@@ -172,7 +180,7 @@ public class UsersApiController {
         userManager.editUser(userModification.getId(), userModification.getOrganizationId(),
             userModification.getUsername(), userModification.getFirstName(), userModification.getLastName(),
             userModification.getEmailAddress(), userModification.getDescription(),
-            Role.valueOf(userModification.getRole()), principal.getName());
+            Role.valueOf(userModification.getRole()), principal);
         return OK;
     }
 
@@ -185,7 +193,7 @@ public class UsersApiController {
             userModification.getFirstName(), userModification.getLastName(),
             userModification.getEmailAddress(), requested,
             type == null ? User.Type.INTERNAL : type,
-            userModification.getValidToAsDateTime(), userModification.getDescription());
+            userModification.getValidToAsDateTime(), userModification.getDescription(), principal);
         String qrCode = type != User.Type.API_KEY ? Base64.getEncoder().encodeToString(generateQRCode(userWithPassword, baseUrl)) : null;
         return new UserWithPasswordAndQRCode(userWithPassword, qrCode);
     }
@@ -228,19 +236,19 @@ public class UsersApiController {
 
     @DeleteMapping("/users/{id}")
     public String deleteUser(@PathVariable("id") int userId, Principal principal) {
-        userManager.deleteUser(userId, principal.getName());
+        userManager.deleteUser(userId, principal);
         return OK;
     }
 
     @PostMapping("/users/{id}/enable/{enable}")
     public String enableUser(@PathVariable("id") int userId, @PathVariable("enable")boolean enable, Principal principal) {
-        userManager.enable(userId, principal.getName(), enable);
+        userManager.enable(userId, enable, principal);
         return OK;
     }
 
     @GetMapping("/users/{id}")
-    public UserModification loadUser(@PathVariable("id") int userId) {
-        User user = userManager.findUser(userId);
+    public UserModification loadUser(@PathVariable("id") int userId, Principal principal) {
+        User user = userManager.findUser(userId, principal);
         List<Organization> userOrganizations = userManager.findUserOrganizations(user.getUsername());
         return new UserModification(user.getId(), userOrganizations.get(0).getId(), userManager.getUserRole(user).name(),
             user.getUsername(), user.getFirstName(), user.getLastName(), user.getEmailAddress(),
@@ -259,19 +267,18 @@ public class UsersApiController {
     @PostMapping("/users/current/update-password")
     public ValidationResult updateCurrentUserPassword(@RequestBody PasswordModification passwordModification, Principal principal) {
         return userManager.validateNewPassword(principal.getName(), passwordModification.oldPassword, passwordModification.newPassword, passwordModification.newPasswordConfirm)
-            .ifSuccess(() -> userManager.updatePassword(principal.getName(), passwordModification.newPassword));
+            .ifSuccess(() -> userManager.updateCurrentUserPassword(passwordModification.newPassword, principal));
     }
 
     @PostMapping("/users/current/edit")
     public void updateCurrentUser(@RequestBody UserModification userModification, Principal principal) {
-        User user = userManager.findUserByUsername(principal.getName());
-        userManager.updateUserContactInfo(user.getId(), userModification.getFirstName(), userModification.getLastName(), userModification.getEmailAddress());
+        userManager.updateCurrentUserContactInfo(userModification.getFirstName(), userModification.getLastName(), userModification.getEmailAddress(), principal);
 
     }
 
     @PutMapping("/users/{id}/reset-password")
-    public UserWithPasswordAndQRCode resetPassword(@PathVariable("id") int userId, @RequestParam("baseUrl") String baseUrl) {
-        UserWithPassword userWithPassword = userManager.resetPassword(userId);
+    public UserWithPasswordAndQRCode resetPassword(@PathVariable("id") int userId, @RequestParam("baseUrl") String baseUrl, Principal principal) {
+        UserWithPassword userWithPassword = userManager.resetPassword(userId, principal);
         return new UserWithPasswordAndQRCode(userWithPassword, Base64.getEncoder().encodeToString(generateQRCode(userWithPassword, baseUrl)));
     }
 
@@ -301,7 +308,7 @@ public class UsersApiController {
             return role.getDescription();
         }
 
-        public String getTarget() { return role.getTarget().name(); }
+        public List<String> getTarget() { return role.getTarget().stream().map(RoleTarget::name).collect(Collectors.toList()); }
     }
 
     private static final class PasswordModification {

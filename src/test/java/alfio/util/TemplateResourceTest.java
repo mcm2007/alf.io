@@ -16,10 +16,7 @@
  */
 package alfio.util;
 
-import alfio.model.Event;
-import alfio.model.Ticket;
-import alfio.model.TicketCategory;
-import alfio.model.TicketReservation;
+import alfio.model.*;
 import alfio.model.user.Organization;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,18 +30,18 @@ import java.util.Optional;
 
 import static alfio.test.util.TestUtil.clockProvider;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class TemplateResourceTest {
+class TemplateResourceTest {
 
     private Organization organization;
     private Event event;
     private TicketReservation ticketReservation;
     private TicketCategory ticketCategory;
     private Ticket ticket;
+    private TicketWithMetadataAttributes ticketWithMetadata;
 
     @BeforeEach
     void setUp() {
@@ -53,10 +50,11 @@ public class TemplateResourceTest {
         ticketReservation = mock(TicketReservation.class);
         ticketCategory = mock(TicketCategory.class);
         ticket = mock(Ticket.class);
+        ticketWithMetadata = TicketWithMetadataAttributes.build(ticket, null);
     }
 
     @Test
-    public void buildModelForTicketEmail() {
+    void buildModelForTicketEmail() {
         Pair<ZonedDateTime, ZonedDateTime> dates = getDates();
         Map<String, Object> model = TemplateResource.buildModelForTicketEmail(organization, event, ticketReservation, "Https://test", "Https://test", "Https://test", ticket, ticketCategory, Map.of());
         assertEquals(dates.getLeft(), model.get("validityStart"));
@@ -64,11 +62,11 @@ public class TemplateResourceTest {
     }
 
     @Test
-    public void buildModelForTicketPDF() {
+    void buildModelForTicketPDF() {
         Pair<ZonedDateTime, ZonedDateTime> dates = getDates();
-        when(ticket.ticketCode(anyString())).thenReturn("abcd");
+        when(ticket.ticketCode(anyString(), anyBoolean())).thenReturn("abcd");
         when(event.getPrivateKey()).thenReturn("key");
-        Map<String, Object> model = TemplateResource.buildModelForTicketPDF(organization, event, ticketReservation, ticketCategory, ticket, Optional.empty(), "abcd", Collections.emptyMap());
+        Map<String, Object> model = TemplateResource.buildModelForTicketPDF(organization, event, ticketReservation, ticketCategory, ticketWithMetadata, Optional.empty(), "abcd", Collections.emptyMap());
         assertEquals(dates.getLeft(), model.get("validityStart"));
         assertEquals(dates.getRight(), model.get("validityEnd"));
     }
@@ -82,7 +80,7 @@ public class TemplateResourceTest {
         when(event.getZoneId()).thenReturn(ZoneId.systemDefault());
         when(event.getEnd()).thenReturn(eventEnd);
         when(ticketCategory.getTicketValidityStart(eq(ZoneId.systemDefault()))).thenReturn(validityStart);
-        when(ticket.ticketCode(anyString())).thenReturn("abcd");
+        when(ticket.ticketCode(anyString(), anyBoolean())).thenReturn("abcd");
         return Pair.of(validityStart, eventEnd);
     }
 

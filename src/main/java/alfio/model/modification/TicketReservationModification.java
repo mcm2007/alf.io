@@ -19,9 +19,23 @@ package alfio.model.modification;
 import lombok.Data;
 
 import java.io.Serializable;
+import java.util.List;
+import java.util.Map;
 
 @Data
-public class TicketReservationModification implements Serializable {
+public class TicketReservationModification implements ReservationRequest, Serializable {
     private Integer ticketCategoryId;
-    private Integer amount;
+    private Integer quantity;
+    private List<Map<String, String>> metadata;
+
+    // temporary until we replace the public front-end
+    @Deprecated(forRemoval = true)
+    public Integer getAmount() {
+        return quantity;
+    }
+
+    @Deprecated(forRemoval = true)
+    public void setAmount(Integer amount) {
+        this.quantity = amount;
+    }
 }

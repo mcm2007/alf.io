@@ -32,6 +32,7 @@ import alfio.repository.TicketCategoryRepository;
 import alfio.repository.TicketRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import alfio.test.util.IntegrationTestUtil;
 import alfio.util.ClockProvider;
 import org.apache.commons.lang3.time.DateUtils;
@@ -51,17 +52,15 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 import static alfio.test.util.IntegrationTestUtil.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class CheckInManagerIntegrationTest {
+class CheckInManagerIntegrationTest {
 
     @Autowired
     private CheckInManager checkInManager;
@@ -83,7 +82,7 @@ public class CheckInManagerIntegrationTest {
     private TicketRepository ticketRepository;
 
     @Test
-    public void testReturnOnlyOnce() {
+    void testReturnOnlyOnce() {
         IntegrationTestUtil.ensureMinimalConfiguration(configurationRepository);
         List<TicketCategoryModification> categories = List.of(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
@@ -114,7 +113,7 @@ public class CheckInManagerIntegrationTest {
         var additionalService = eventManager.insertAdditionalService(event, additionalServiceRequest);
         var category = ticketCategoryRepository.findAllTicketCategories(event.getId()).get(0);
         TicketReservationModification tr = new TicketReservationModification();
-        tr.setAmount(AVAILABLE_SEATS);
+        tr.setQuantity(AVAILABLE_SEATS);
         tr.setTicketCategoryId(category.getId());
 
         var tickets = new TicketReservationWithOptionalCodeModification(tr, Optional.empty());
@@ -127,16 +126,15 @@ public class CheckInManagerIntegrationTest {
         Pair<TotalPrice, Optional<PromoCodeDiscount>> priceAndDiscount = ticketReservationManager.totalReservationCostWithVAT(reservationId);
         TotalPrice reservationCost = priceAndDiscount.getLeft();
         assertTrue(priceAndDiscount.getRight().isEmpty());
-        PaymentSpecification specification = new PaymentSpecification(reservationId, null, reservationCost.getPriceWithVAT(),
+        PaymentSpecification specification = new PaymentSpecification(reservationId, null, reservationCost.priceWithVAT(),
             event, "email@example.com", new CustomerName("full name", "full", "name", event.mustUseFirstAndLastName()),
             "billing address", null, Locale.ENGLISH, true, false, null, "IT", "123456", PriceContainer.VatStatus.INCLUDED, true, false);
         PaymentResult result = ticketReservationManager.performPayment(specification, reservationCost, PaymentProxy.OFFLINE, PaymentMethod.BANK_TRANSFER, null);
         assertTrue(result.isSuccessful());
-        ticketReservationManager.confirmOfflinePayment(event, reservationId, eventAndUser.getRight());
+        ticketReservationManager.confirmOfflinePayment(event, reservationId, null, eventAndUser.getRight());
 
         var returnedAdditionalServices = ticketReservationManager.findTicketsInReservation(reservationId).stream()
-            .filter(ticket -> !checkInManager.getAdditionalServicesForTicket(ticket).isEmpty())
-            .collect(Collectors.toList());
+            .filter(ticket -> !checkInManager.getAdditionalServicesForTicket(ticket).isEmpty()).toList();
         //
         assertEquals(1, returnedAdditionalServices.size());
         assertEquals((int) ticketRepository.findFirstTicketIdInReservation(reservationId).orElseThrow(), returnedAdditionalServices.get(0).getId());

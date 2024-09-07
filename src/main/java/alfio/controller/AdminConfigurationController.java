@@ -21,9 +21,9 @@ import alfio.manager.payment.OAuthPaymentProviderConnector;
 import alfio.manager.payment.StripeConnectManager;
 import alfio.manager.user.UserManager;
 import alfio.util.oauth2.AccessTokenResponseDetails;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -41,9 +41,9 @@ import static alfio.manager.payment.MollieConnectManager.MOLLIE_CONNECT_REDIRECT
 import static alfio.manager.payment.StripeConnectManager.STRIPE_CONNECT_REDIRECT_PATH;
 
 @Controller
-@AllArgsConstructor
-@Log4j2
 public class AdminConfigurationController {
+
+    private static final Logger log = LoggerFactory.getLogger(AdminConfigurationController.class);
 
     private static final String CONNECT_ORG = ".connect.org";
     private static final String CONNECT_STATE_PREFIX = ".connect.state.";
@@ -54,6 +54,14 @@ public class AdminConfigurationController {
     private final MollieConnectManager mollieConnectManager;
     private final UserManager userManager;
 
+    public AdminConfigurationController(StripeConnectManager stripeConnectManager,
+                                        MollieConnectManager mollieConnectManager,
+                                        UserManager userManager) {
+        this.stripeConnectManager = stripeConnectManager;
+        this.mollieConnectManager = mollieConnectManager;
+        this.userManager = userManager;
+    }
+
     @GetMapping("/admin/configuration/payment/{provider}/connect/{orgId}")
     public String oAuthRedirectToAuthorizationURL(Principal principal,
                                                   @PathVariable("orgId") Integer orgId,
@@ -61,9 +69,9 @@ public class AdminConfigurationController {
                                                   HttpSession session) {
         if(CONNECT_PROVIDERS.contains(provider) && userManager.isOwnerOfOrganization(userManager.findUserByUsername(principal.getName()), orgId)) {
             var connectURL = getConnector(provider).getConnectURL(orgId);
-            session.setAttribute(provider+CONNECT_STATE_PREFIX +orgId, connectURL.getState());
+            session.setAttribute(provider+CONNECT_STATE_PREFIX +orgId, connectURL.state());
             session.setAttribute(provider+CONNECT_ORG, orgId);
-            return "redirect:" + connectURL.getAuthorizationUrl();
+            return "redirect:" + connectURL.authorizationUrl();
         }
         return REDIRECT_ADMIN;
     }
@@ -92,7 +100,7 @@ public class AdminConfigurationController {
                 boolean stateVerified = Objects.equals(persistedState, state);
                 if(stateVerified && code != null) {
                     AccessTokenResponseDetails connectResult = getConnector(provider).storeConnectedAccountId(code, orgId);
-                    if(connectResult.isSuccess()) {
+                    if(connectResult.success()) {
                         return "redirect:/admin/#/configuration/organization/"+orgId;
                     }
                 } else if(stateVerified && StringUtils.isNotEmpty(errorCode)) {

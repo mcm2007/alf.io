@@ -75,6 +75,15 @@ public interface UserRepository {
                                            @Bind("email_address") String emailAddress, @Bind("enabled") boolean enabled, @Bind("userType") User.Type userType,
                                            @Bind("validTo") ZonedDateTime validTo, @Bind("description") String description);
 
+    @Query("INSERT INTO ba_user(username, password, first_name, last_name, email_address, enabled, user_type) VALUES"
+        + " (:username, :password, :first_name, :last_name, :email_address, :enabled, 'PUBLIC') on conflict(username) do nothing")
+    int createPublicUserIfNotExists(@Bind("username") String username,
+                                                                @Bind("password") String password,
+                                                                @Bind("first_name") String firstname,
+                                                                @Bind("last_name") String lastname,
+                                                                @Bind("email_address") String emailAddress,
+                                                                @Bind("enabled") boolean enabled);
+
     @Query("update ba_user set username = :username, first_name = :firstName, last_name = :lastName, email_address = :emailAddress, description = :description where id = :id")
     int update(@Bind("id") int id, @Bind("username") String username, @Bind("firstName") String firstName, @Bind("lastName") String lastName,
                @Bind("emailAddress") String emailAddress, @Bind("description") String description);
@@ -97,8 +106,8 @@ public interface UserRepository {
     @Query("delete from ba_user where id = :id")
     int deleteUser(@Bind("id") int id);
 
-    @Query("select id from ba_user where user_type = :type and enabled = true and user_creation_time < :date")
-    List<Integer> findUsersToDeleteOlderThan(@Bind("date") Date date, @Bind("type") User.Type type);
+    @Query("select id from ba_user where user_type in (:types) and enabled = true and user_creation_time < :date")
+    List<Integer> findUsersToDeleteOlderThan(@Bind("date") Date date, @Bind("types") Collection<String> types);
 
     @Query("delete from authority where username = (select username from ba_user where id = :id)")
     int deleteUserFromAuthority(@Bind("id") int id);

@@ -25,7 +25,8 @@ import alfio.model.modification.TicketCategoryModification;
 import alfio.model.modification.support.LocationDescriptor;
 import alfio.model.transaction.PaymentProxy;
 import alfio.model.user.Organization;
-import lombok.AllArgsConstructor;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
@@ -42,28 +43,60 @@ import static java.util.Collections.emptyList;
 import static org.apache.commons.collections.CollectionUtils.isEmpty;
 
 @Getter
-@AllArgsConstructor
 public class EventCreationRequest{
-    private String title;
-    private String slug;
-    private List<DescriptionRequest> description;
-    private Event.EventFormat format;
-    private LocationRequest location;
-    private String timezone;
-    private LocalDateTime startDate;
-    private LocalDateTime endDate;
-    private String websiteUrl;
-    private String termsAndConditionsUrl;
-    private String privacyPolicyUrl;
-    private String imageUrl;
-    private TicketRequest tickets;
-    private List<ExtensionSetting> extensionSettings;
-    private List<AttendeeAdditionalInfoRequest> additionalInfo;
+    private final String title;
+    private final String slug;
+    private final List<DescriptionRequest> description;
+    private final Event.EventFormat format;
+    private final LocationRequest location;
+    private final String timezone;
+    private final LocalDateTime startDate;
+    private final LocalDateTime endDate;
+    private final String websiteUrl;
+    private final String termsAndConditionsUrl;
+    private final String privacyPolicyUrl;
+    private final String imageUrl;
+    private final TicketRequest tickets;
+    private final List<ExtensionSetting> extensionSettings;
+    private final List<AttendeeAdditionalInfoRequest> additionalInfo;
+
+    @JsonCreator
+    public EventCreationRequest(@JsonProperty("title") String title,
+                                @JsonProperty("slug") String slug,
+                                @JsonProperty("description") List<DescriptionRequest> description,
+                                @JsonProperty("format") Event.EventFormat format,
+                                @JsonProperty("location") LocationRequest location,
+                                @JsonProperty("timezone") String timezone,
+                                @JsonProperty("startDate") LocalDateTime startDate,
+                                @JsonProperty("endDate") LocalDateTime endDate,
+                                @JsonProperty("websiteUrl") String websiteUrl,
+                                @JsonProperty("termsAndConditionsUrl") String termsAndConditionsUrl,
+                                @JsonProperty("privacyPolicyUrl") String privacyPolicyUrl,
+                                @JsonProperty("imageUrl") String imageUrl,
+                                @JsonProperty("tickets") TicketRequest tickets,
+                                @JsonProperty("extensionSettings") List<ExtensionSetting> extensionSettings,
+                                @JsonProperty("additionalInfo") List<AttendeeAdditionalInfoRequest> additionalInfo) {
+        this.title = title;
+        this.slug = slug;
+        this.description = description;
+        this.format = format;
+        this.location = location;
+        this.timezone = timezone;
+        this.startDate = startDate;
+        this.endDate = endDate;
+        this.websiteUrl = websiteUrl;
+        this.termsAndConditionsUrl = termsAndConditionsUrl;
+        this.privacyPolicyUrl = privacyPolicyUrl;
+        this.imageUrl = imageUrl;
+        this.tickets = tickets;
+        this.extensionSettings = extensionSettings;
+        this.additionalInfo = additionalInfo;
+    }
 
     public EventModification toEventModification(Organization organization, UnaryOperator<String> slugGenerator, String imageRef) {
-        String slug = this.slug;
-        if(StringUtils.isBlank(slug)) {
-            slug = slugGenerator.apply(title);
+        String eventSlug = this.slug;
+        if(StringUtils.isBlank(eventSlug)) {
+            eventSlug = slugGenerator.apply(title);
         }
 
         int locales = description.stream()
@@ -81,7 +114,7 @@ public class EventCreationRequest{
             StringUtils.trimToNull(privacyPolicyUrl),
             null,
             imageRef,
-            slug,
+            eventSlug,
             title,
             organization.getId(),
             location.getFullAddress(),
@@ -91,13 +124,13 @@ public class EventCreationRequest{
             description.stream().collect(Collectors.toMap(DescriptionRequest::getLang,DescriptionRequest::getBody)),
             new DateTimeModification(startDate.toLocalDate(),startDate.toLocalTime()),
             new DateTimeModification(endDate.toLocalDate(),endDate.toLocalTime()),
-            tickets.freeOfCharge ? BigDecimal.ZERO : tickets.categories.stream().map(x -> x.price).max(BigDecimal::compareTo).orElse(BigDecimal.ONE).max(BigDecimal.ONE),
+            Boolean.TRUE.equals(tickets.freeOfCharge) ? BigDecimal.ZERO : tickets.categories.stream().map(x -> x.price).max(BigDecimal::compareTo).orElse(BigDecimal.ONE).max(BigDecimal.ONE),
             tickets.currency,
             tickets.max,
             tickets.taxPercentage,
             tickets.taxIncludedInPrice,
             tickets.paymentMethods,
-            tickets.categories.stream().map(CategoryRequest::toTicketCategoryModification).collect(Collectors.toList()),
+            getTicketCategoryModificationList(),
             tickets.freeOfCharge,
             new LocationDescriptor(timezone, location.getCoordinate().getLatitude(), location.getCoordinate().getLongitude(), null),
             locales,
@@ -106,6 +139,14 @@ public class EventCreationRequest{
             AlfioMetadata.empty(),
             List.of()
         );
+    }
+
+    private List<TicketCategoryModification> getTicketCategoryModificationList() {
+        var result = new ArrayList<TicketCategoryModification>();
+        for (int c = 0; c < tickets.categories.size(); c++) {
+            result.add(tickets.categories.get(c).toNewTicketCategoryModification(c + 1 ));
+        }
+        return List.copyOf(result);
     }
 
     private static <T> T first(T value,T other) {
@@ -150,7 +191,7 @@ public class EventCreationRequest{
             tickets != null ? first(tickets.taxPercentage,original.getVat()) : original.getVat(),
             tickets != null ? first(tickets.taxIncludedInPrice,original.isVatIncluded()) : original.isVatIncluded(),
             tickets != null ? first(tickets.paymentMethods, original.getAllowedPaymentProxies()) : original.getAllowedPaymentProxies(),
-            tickets != null && tickets.categories != null ? tickets.categories.stream().map(tc -> tc.toTicketCategoryModification(findCategoryId(original, tc))).collect(Collectors.toList()) : null,
+            tickets != null && tickets.categories != null ? createFromExistingCategories(original) : null,
             tickets != null ? first(tickets.freeOfCharge,original.isFreeOfCharge()) : original.isFreeOfCharge(),
             null,
             locales,
@@ -161,69 +202,145 @@ public class EventCreationRequest{
         );
     }
 
-    private static Integer findCategoryId(EventWithAdditionalInfo event, CategoryRequest categoryRequest) {
-        return event.getTicketCategories().stream()
-            .filter(tc -> tc.getName().equals(categoryRequest.getName()))
-            .map(TicketCategoryWithAdditionalInfo::getId)
-            .findFirst()
-            .orElse(null);
+    private List<TicketCategoryModification> createFromExistingCategories(EventWithAdditionalInfo event) {
+        var result = new ArrayList<TicketCategoryModification>(tickets.categories.size());
+        for(int c = 0; c < tickets.categories.size(); c++) {
+            var categoryRequest = tickets.categories.get(c);
+            var existing = findExistingCategory(event.getTicketCategories(), categoryRequest.getName(), categoryRequest.getId());
+            if (existing.isPresent()) {
+                var category = existing.get();
+                result.add(categoryRequest.toExistingTicketCategoryModification(category.getId(), category.getOrdinal()));
+            } else {
+                result.add(categoryRequest.toNewTicketCategoryModification(c + 1));
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    public static Optional<TicketCategoryWithAdditionalInfo> findExistingCategory(List<TicketCategoryWithAdditionalInfo> categories,
+                                                                                  String name,
+                                                                                  Integer id) {
+        return categories.stream()
+            // if specified, ID takes precedence over name
+            .filter(oc -> id != null ? id == oc.getId() : oc.getName().equals(name))
+            .findFirst();
     }
 
 
     @Getter
-    @AllArgsConstructor
     public static class DescriptionRequest {
-        private String lang;
-        private String body;
+        private final String lang;
+        private final String body;
+
+        @JsonCreator
+        public DescriptionRequest(@JsonProperty("lang") String lang, @JsonProperty("body") String body) {
+            this.lang = lang;
+            this.body = body;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class LocationRequest {
-        private String fullAddress;
-        private CoordinateRequest coordinate;
+        private final String fullAddress;
+        private final CoordinateRequest coordinate;
+
+        @JsonCreator
+        public LocationRequest(@JsonProperty("fullAddress") String fullAddress, @JsonProperty("coordinate") CoordinateRequest coordinate) {
+            this.fullAddress = fullAddress;
+            this.coordinate = coordinate;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class TicketRequest {
-        private Boolean freeOfCharge;
-        private Integer max;
-        private String currency;
-        private BigDecimal taxPercentage;
-        private Boolean taxIncludedInPrice;
-        private List<PaymentProxy> paymentMethods;
-        private List<CategoryRequest> categories;
-        private List<PromoCodeRequest> promoCodes;
+        private final Boolean freeOfCharge;
+        private final Integer max;
+        private final String currency;
+        private final BigDecimal taxPercentage;
+        private final Boolean taxIncludedInPrice;
+        private final List<PaymentProxy> paymentMethods;
+        private final List<CategoryRequest> categories;
+        private final List<PromoCodeRequest> promoCodes;
+
+        @JsonCreator
+        public TicketRequest(@JsonProperty("freeOfCharge") Boolean freeOfCharge,
+                             @JsonProperty("max") Integer max,
+                             @JsonProperty("currency") String currency,
+                             @JsonProperty("taxPercentage") BigDecimal taxPercentage,
+                             @JsonProperty("taxIncludedInPrice") Boolean taxIncludedInPrice,
+                             @JsonProperty("paymentMethods") List<PaymentProxy> paymentMethods,
+                             @JsonProperty("categories") List<CategoryRequest> categories,
+                             @JsonProperty("promoCodes") List<PromoCodeRequest> promoCodes) {
+            this.freeOfCharge = freeOfCharge;
+            this.max = max;
+            this.currency = currency;
+            this.taxPercentage = taxPercentage;
+            this.taxIncludedInPrice = taxIncludedInPrice;
+            this.paymentMethods = paymentMethods;
+            this.categories = categories;
+            this.promoCodes = promoCodes;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class CoordinateRequest {
-        private String latitude;
-        private String longitude;
+        private final String latitude;
+        private final String longitude;
+
+        @JsonCreator
+        public CoordinateRequest(@JsonProperty("latitude") String latitude, @JsonProperty("longitude") String longitude) {
+            this.latitude = latitude;
+            this.longitude = longitude;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class CategoryRequest {
-        private String name;
-        private List<DescriptionRequest> description;
-        private Integer maxTickets;
-        private boolean accessRestricted;
-        private BigDecimal price;
-        private LocalDateTime startSellingDate;
-        private LocalDateTime endSellingDate;
-        private String accessCode;
-        private CustomTicketValidityRequest customValidity;
-        private GroupLinkRequest groupLink;
-        private TicketCategory.TicketAccessType ticketAccessType;
+        private final Integer id;
+        private final String name;
+        private final List<DescriptionRequest> description;
+        private final Integer maxTickets;
+        private final boolean accessRestricted;
+        private final BigDecimal price;
+        private final LocalDateTime startSellingDate;
+        private final LocalDateTime endSellingDate;
+        private final String accessCode;
+        private final CustomTicketValidityRequest customValidity;
+        private final GroupLinkRequest groupLink;
+        private final TicketCategory.TicketAccessType ticketAccessType;
 
-        TicketCategoryModification toTicketCategoryModification() {
-            return toTicketCategoryModification(null);
+        @JsonCreator
+        public CategoryRequest(@JsonProperty("id") Integer id,
+                               @JsonProperty("name") String name,
+                               @JsonProperty("description") List<DescriptionRequest> description,
+                               @JsonProperty("maxTickets") Integer maxTickets,
+                               @JsonProperty("accessRestricted") boolean accessRestricted,
+                               @JsonProperty("price") BigDecimal price,
+                               @JsonProperty("startSellingDate") LocalDateTime startSellingDate,
+                               @JsonProperty("endSellingDate") LocalDateTime endSellingDate,
+                               @JsonProperty("accessCode") String accessCode,
+                               @JsonProperty("customValidity") CustomTicketValidityRequest customValidity,
+                               @JsonProperty("groupLink") GroupLinkRequest groupLink,
+                               @JsonProperty("ticketAccessType") TicketCategory.TicketAccessType ticketAccessType) {
+            this.id = id;
+            this.name = name;
+            this.description = description;
+            this.maxTickets = maxTickets;
+            this.accessRestricted = accessRestricted;
+            this.price = price;
+            this.startSellingDate = startSellingDate;
+            this.endSellingDate = endSellingDate;
+            this.accessCode = accessCode;
+            this.customValidity = customValidity;
+            this.groupLink = groupLink;
+            this.ticketAccessType = ticketAccessType;
         }
 
-        TicketCategoryModification toTicketCategoryModification(Integer categoryId) {
+        TicketCategoryModification toNewTicketCategoryModification(int ordinal) {
+            return toExistingTicketCategoryModification(null, ordinal);
+        }
+
+        TicketCategoryModification toExistingTicketCategoryModification(Integer categoryId, int ordinal) {
             int capacity = Optional.ofNullable(maxTickets).orElse(0);
 
             Optional<CustomTicketValidityRequest> customValidityOpt = Optional.ofNullable(customValidity);
@@ -245,7 +362,7 @@ public class EventCreationRequest{
                 customValidityOpt.flatMap(x -> Optional.ofNullable(x.checkInTo)).map(x -> new DateTimeModification(x.toLocalDate(),x.toLocalTime())).orElse(null),
                 customValidityOpt.flatMap(x -> Optional.ofNullable(x.validityStart)).map(x -> new DateTimeModification(x.toLocalDate(),x.toLocalTime())).orElse(null),
                 customValidityOpt.flatMap(x -> Optional.ofNullable(x.validityEnd)).map(x -> new DateTimeModification(x.toLocalDate(),x.toLocalTime())).orElse(null),
-                0,
+                ordinal,
                 null,
                 null,
                 AlfioMetadata.empty());
@@ -253,53 +370,111 @@ public class EventCreationRequest{
     }
 
     @Getter
-    @AllArgsConstructor
     public static class CustomTicketValidityRequest {
-        private LocalDateTime checkInFrom;
-        private LocalDateTime checkInTo;
-        private LocalDateTime validityStart;
-        private LocalDateTime validityEnd;
+        private final LocalDateTime checkInFrom;
+        private final LocalDateTime checkInTo;
+        private final LocalDateTime validityStart;
+        private final LocalDateTime validityEnd;
+
+        @JsonCreator
+        public CustomTicketValidityRequest(@JsonProperty("checkInFrom") LocalDateTime checkInFrom,
+                                           @JsonProperty("checkInTo") LocalDateTime checkInTo,
+                                           @JsonProperty("validityStart") LocalDateTime validityStart,
+                                           @JsonProperty("validityEnd") LocalDateTime validityEnd) {
+            this.checkInFrom = checkInFrom;
+            this.checkInTo = checkInTo;
+            this.validityStart = validityStart;
+            this.validityEnd = validityEnd;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class PromoCodeRequest {
-        private String name;
-        private LocalDateTime validFrom;
-        private LocalDateTime validTo;
-        private PromoCodeDiscount.DiscountType discountType;
-        private int discount;
+        private final String name;
+        private final LocalDateTime validFrom;
+        private final LocalDateTime validTo;
+        private final PromoCodeDiscount.DiscountType discountType;
+        private final int discount;
+
+        @JsonCreator
+        public PromoCodeRequest(@JsonProperty("name") String name,
+                                @JsonProperty("validFrom") LocalDateTime validFrom,
+                                @JsonProperty("validTo") LocalDateTime validTo,
+                                @JsonProperty("discountType") PromoCodeDiscount.DiscountType discountType,
+                                @JsonProperty("discount") int discount) {
+            this.name = name;
+            this.validFrom = validFrom;
+            this.validTo = validTo;
+            this.discountType = discountType;
+            this.discount = discount;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class ExtensionSetting {
-        private String extensionId;
-        private String key;
-        private String value;
+        private final String extensionId;
+        private final String key;
+        private final String value;
+
+        @JsonCreator
+        public ExtensionSetting(@JsonProperty("extensionId") String extensionId,
+                                @JsonProperty("key") String key,
+                                @JsonProperty("value") String value) {
+            this.extensionId = extensionId;
+            this.key = key;
+            this.value = value;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class GroupLinkRequest {
-        private Integer groupId;
-        private LinkedGroup.Type type;
-        private LinkedGroup.MatchType matchType;
-        private Integer maxAllocation;
+        private final Integer groupId;
+        private final LinkedGroup.Type type;
+        private final LinkedGroup.MatchType matchType;
+        private final Integer maxAllocation;
+
+        @JsonCreator
+        public GroupLinkRequest(@JsonProperty("groupId") Integer groupId,
+                                @JsonProperty("type") LinkedGroup.Type type,
+                                @JsonProperty("matchType") LinkedGroup.MatchType matchType,
+                                @JsonProperty("maxAllocation") Integer maxAllocation) {
+            this.groupId = groupId;
+            this.type = type;
+            this.matchType = matchType;
+            this.maxAllocation = maxAllocation;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class AttendeeAdditionalInfoRequest {
 
-        private Integer ordinal;
-        private String name;
-        private AdditionalInfoType type;
-        private Boolean required;
-        private List<DescriptionRequest> label;
-        private List<DescriptionRequest> placeholder;
-        private List<RestrictedValueRequest> restrictedValues;
-        private ContentLengthRequest contentLength;
+        private final Integer ordinal;
+        private final String name;
+        private final AdditionalInfoType type;
+        private final Boolean required;
+        private final List<DescriptionRequest> label;
+        private final List<DescriptionRequest> placeholder;
+        private final List<RestrictedValueRequest> restrictedValues;
+        private final ContentLengthRequest contentLength;
+
+        @JsonCreator
+        public AttendeeAdditionalInfoRequest(@JsonProperty("ordinal") Integer ordinal,
+                                             @JsonProperty("name") String name,
+                                             @JsonProperty("type") AdditionalInfoType type,
+                                             @JsonProperty("required") Boolean required,
+                                             @JsonProperty("label") List<DescriptionRequest> label,
+                                             @JsonProperty("placeholder") List<DescriptionRequest> placeholder,
+                                             @JsonProperty("restrictedValues") List<RestrictedValueRequest> restrictedValues,
+                                             @JsonProperty("contentLength") ContentLengthRequest contentLength) {
+            this.ordinal = ordinal;
+            this.name = name;
+            this.type = type;
+            this.required = required;
+            this.label = label;
+            this.placeholder = placeholder;
+            this.restrictedValues = restrictedValues;
+            this.contentLength = contentLength;
+        }
 
 
         private EventModification.AdditionalField toAdditionalField(int ordinal) {
@@ -307,9 +482,9 @@ public class EventCreationRequest{
             String code = type != null ? type.code : AdditionalInfoType.GENERIC_TEXT.code;
             Integer minLength = contentLength != null ? contentLength.min : null;
             Integer maxLength = contentLength != null ? contentLength.max : null;
-            List<EventModification.RestrictedValue> restrictedValues = null;
+            List<EventModification.RestrictedValue> cleanRestrictedValues = null;
             if(!isEmpty(this.restrictedValues)) {
-                restrictedValues = this.restrictedValues.stream().map(rv -> new EventModification.RestrictedValue(rv.value, rv.enabled)).collect(Collectors.toList());
+                cleanRestrictedValues = this.restrictedValues.stream().map(rv -> new EventModification.RestrictedValue(rv.value, rv.enabled)).toList();
             }
 
             return new EventModification.AdditionalField(
@@ -321,36 +496,36 @@ public class EventCreationRequest{
                 false,
                 minLength,
                 maxLength,
-                restrictedValues,
+                cleanRestrictedValues,
                 toDescriptionMap(orEmpty(label), orEmpty(placeholder), orEmpty(this.restrictedValues)),
                 null,//TODO: linkedAdditionalService
                 null);//TODO: linkedCategoryIds
+        }
+
+        private static Map<String, EventModification.Description> toDescriptionMap(List<DescriptionRequest> label,
+                                                                                   List<DescriptionRequest> placeholder,
+                                                                                   List<RestrictedValueRequest> restrictedValues) {
+            Map<String, String> labelsByLang = label.stream().collect(Collectors.toMap(DescriptionRequest::getLang, DescriptionRequest::getBody));
+            Map<String, String> placeholdersByLang = placeholder.stream().collect(Collectors.toMap(DescriptionRequest::getLang, DescriptionRequest::getBody));
+            Map<String, List<Triple<String, String, String>>> valuesByLang = restrictedValues.stream()
+                .flatMap(rv -> rv.descriptions.stream().map(rvd -> Triple.of(rvd.lang, rv.value, rvd.body)))
+                .collect(Collectors.groupingBy(Triple::getLeft));
+
+
+            Set<String> keys = new HashSet<>(labelsByLang.keySet());
+            keys.addAll(placeholdersByLang.keySet());
+            keys.addAll(valuesByLang.keySet());
+
+            return keys.stream()
+                .map(lang -> {
+                    Map<String, String> rvsMap = valuesByLang.getOrDefault(lang, emptyList()).stream().collect(Collectors.toMap(Triple::getMiddle, Triple::getRight));
+                    return Pair.of(lang, new EventModification.Description(labelsByLang.get(lang), placeholdersByLang.get(lang), rvsMap));
+                }).collect(Collectors.toMap(Pair::getLeft, Pair::getRight));
         }
     }
 
     private static <T> List<T> orEmpty(List<T> input) {
         return isEmpty(input) ? emptyList() : input;
-    }
-
-    private static Map<String, EventModification.Description> toDescriptionMap(List<DescriptionRequest> label,
-                                                                               List<DescriptionRequest> placeholder,
-                                                                               List<RestrictedValueRequest> restrictedValues) {
-        Map<String, String> labelsByLang = label.stream().collect(Collectors.toMap(DescriptionRequest::getLang, DescriptionRequest::getBody));
-        Map<String, String> placeholdersByLang = placeholder.stream().collect(Collectors.toMap(DescriptionRequest::getLang, DescriptionRequest::getBody));
-        Map<String, List<Triple<String, String, String>>> valuesByLang = restrictedValues.stream()
-            .flatMap(rv -> rv.descriptions.stream().map(rvd -> Triple.of(rvd.lang, rv.value, rvd.body)))
-            .collect(Collectors.groupingBy(Triple::getLeft));
-
-
-        Set<String> keys = new HashSet<>(labelsByLang.keySet());
-        keys.addAll(placeholdersByLang.keySet());
-        keys.addAll(valuesByLang.keySet());
-
-        return keys.stream()
-            .map(lang -> {
-                Map<String, String> rvsMap = valuesByLang.getOrDefault(lang, emptyList()).stream().collect(Collectors.toMap(Triple::getMiddle, Triple::getRight));
-                return Pair.of(lang, new EventModification.Description(labelsByLang.get(lang), placeholdersByLang.get(lang), rvsMap));
-            }).collect(Collectors.toMap(Pair::getLeft, Pair::getRight));
     }
 
 
@@ -359,7 +534,7 @@ public class EventCreationRequest{
             return emptyList();
         }
         AtomicInteger counter = new AtomicInteger(1);
-        return additionalInfoRequests.stream().map(air -> air.toAdditionalField(counter.getAndIncrement())).collect(Collectors.toList());
+        return additionalInfoRequests.stream().map(air -> air.toAdditionalField(counter.getAndIncrement())).toList();
     }
 
     @Getter
@@ -385,21 +560,30 @@ public class EventCreationRequest{
     public static final Set<String> WITH_RESTRICTED_VALUES = Set.of(AdditionalInfoType.LIST_BOX.code, AdditionalInfoType.CHECKBOX.code, AdditionalInfoType.RADIO.code);
 
     @Getter
-    @AllArgsConstructor
     public static class ContentLengthRequest {
-        private Integer min;
-        private Integer max;
+        private final Integer min;
+        private final Integer max;
+
+        @JsonCreator
+        public ContentLengthRequest(@JsonProperty("min") Integer min, @JsonProperty("max") Integer max) {
+            this.min = min;
+            this.max = max;
+        }
     }
 
     @Getter
-    @AllArgsConstructor
     public static class RestrictedValueRequest {
+        private final String value;
+        private final Boolean enabled;
+        private final List<DescriptionRequest> descriptions;
 
-        private String value;
-        private Boolean enabled;
-        private List<DescriptionRequest> descriptions;
-
+        @JsonCreator
+        public RestrictedValueRequest(@JsonProperty("value") String value,
+                                      @JsonProperty("enabled") Boolean enabled,
+                                      @JsonProperty("descriptions") List<DescriptionRequest> descriptions) {
+            this.value = value;
+            this.enabled = enabled;
+            this.descriptions = descriptions;
+        }
     }
-
-
 }

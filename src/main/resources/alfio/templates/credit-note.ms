@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<html>
+<html lang="{{#i18n}}locale{{/i18n}}">
 	<head>
+        <title>{{#i18n}}invoice.credit-note{{/i18n}}</title>
+        <meta name="subject" content="{{#i18n}}invoice.credit-note{{/i18n}}" />
+        <meta name="author" content="{{organization.name}}" />
+        <meta name="description" content="{{#i18n}}invoice.credit-note{{/i18n}}" />
 		<style>
 
 		    @font-face {
@@ -104,7 +108,7 @@
 	<body>
         <table style="width:100%">
             <tr>
-                {{#eventImage}}<td style="width:{{imageWidth}}px; height:{{imageHeight}}px"><img style="margin:auto; width:{{imageWidth}}px; height:{{imageHeight}}px" src="{{eventImage}}"/></td>{{/eventImage}}
+                {{#eventImage}}<td style="width:{{imageWidth}}px; height:{{imageHeight}}px"><img style="margin:auto; width:{{imageWidth}}px; height:{{imageHeight}}px" src="{{eventImage}}" alt="{{purchaseContext.displayName}}"/></td>{{/eventImage}}
                 {{^eventImage}}<td style="text-align: center; vertical-align: middle;"><h1>{{purchaseContext.displayName}}</h1></td>{{/eventImage}}
                 <td style="text-align: center; vertical-align: middle;"><h1>{{#i18n}}invoice.credit-note{{/i18n}}</h1></td>
             </tr>
@@ -159,19 +163,32 @@
             </thead>
             <tbody>
         {{#orderSummary.summary}}
+            {{^taxDetail}}
                 <tr>
                     <td class="text-center">{{amount}}</td>
                     <td>{{name}}</td>
                     <td class="text-right">{{priceBeforeVat}}</td>
                     <td class="text-right">- {{subTotalBeforeVat}}</td>
                 </tr>
+            {{/taxDetail}}
+            {{#taxDetail}}
+                <tr>
+                    <th colspan="3">{{#i18n}}reservation-page.vat [{{taxPercentage}}] [{{vatTranslation}}]{{/i18n}}</th>
+                    <th class="text-right">- {{subTotalBeforeVat}}</th>
+                </tr>
+            {{/taxDetail}}
         {{/orderSummary.summary}}
+        {{^orderSummary.free}}
+            {{#orderSummary.displayVat}}
+                <tr>
+                    <th colspan="3">{{#i18n}}reservation-page.vat [{{ticketReservation.usedVatPercent}}] [{{vatTranslation}}]{{/i18n}}</th>
+                    <th class="text-right">- {{orderSummary.totalVAT}}</td>
+                </tr>
+            {{/orderSummary.displayVat}}
+        {{/orderSummary.free}}
             </tbody>
             <tfoot>
                 {{^orderSummary.free}}
-                    {{#orderSummary.displayVat}}
-                        <tr><th colspan="3" class="no-padding">{{#i18n}}reservation-page.vat [{{ticketReservation.usedVatPercent}}] [{{vatTranslation}}]{{/i18n}}</th><th class="text-right">- {{orderSummary.totalVAT}}</th></tr>
-                    {{/orderSummary.displayVat}}
                     {{^orderSummary.displayVat}}
                         <tr><th colspan="4" class="no-padding">{{#i18n}}invoice.vat-voided [{{vatTranslation}}]{{/i18n}}</th></tr>
                     {{/orderSummary.displayVat}}

@@ -31,6 +31,7 @@ import alfio.model.transaction.PaymentProxy;
 import alfio.repository.*;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
 import org.apache.commons.lang3.time.DateUtils;
@@ -38,6 +39,8 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.transaction.annotation.Transactional;
@@ -52,11 +55,10 @@ import java.util.*;
 import static alfio.test.util.IntegrationTestUtil.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class EventManagerIntegrationTest extends BaseIntegrationTest {
+class EventManagerIntegrationTest extends BaseIntegrationTest {
 
     @Autowired
     private ConfigurationRepository configurationRepository;
@@ -88,24 +90,28 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     private TicketReservationManager ticketReservationManager;
     @Autowired
     private ClockProvider clockProvider;
+    @Autowired
+    private NamedParameterJdbcTemplate jdbcTemplate;
 
     @Test
-    public void testUnboundedTicketsGeneration() {
+    void testUnboundedTicketsGeneration() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                         DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
-        Event event = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository).getKey();
+        var eventAndUsername = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository);
+        Event event = eventAndUsername.getKey();
         List<Ticket> tickets = ticketRepository.findFreeByEventId(event.getId());
         assertNotNull(tickets);
         assertFalse(tickets.isEmpty());
         assertEquals(AVAILABLE_SEATS, tickets.size());
         assertTrue(tickets.stream().allMatch(t -> t.getCategoryId() == null));
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), eventAndUsername.getRight(), jdbcTemplate);
     }
 
     @Test
-    public void testEventGeneration() {
+    void testEventGeneration() {
 
         assertFalse(eventManager.eventExistsById(-9000));
 
@@ -114,23 +120,26 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                         DESCRIPTION, BigDecimal.TEN, false, "", true, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
-        Event event = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository).getKey();
+        var eventAndUsername = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository);
+        Event event = eventAndUsername.getKey();
         assertTrue(eventManager.eventExistsById(event.getId()));
         List<Ticket> tickets = ticketRepository.findFreeByEventId(event.getId());
         assertNotNull(tickets);
         assertFalse(tickets.isEmpty());
         assertEquals(AVAILABLE_SEATS, tickets.size());
         assertEquals(10, tickets.stream().filter(t -> t.getCategoryId() == null).count());
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), eventAndUsername.getRight(), jdbcTemplate);
     }
 
     @Test
-    public void testUnboundedEventGeneration() {
+    void testUnboundedEventGeneration() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                         DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
-        Event event = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository).getKey();
+        var eventAndUsername = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository);
+        Event event = eventAndUsername.getKey();
         List<Ticket> tickets = ticketRepository.findFreeByEventId(event.getId());
         assertNotNull(tickets);
         assertFalse(tickets.isEmpty());
@@ -139,10 +148,11 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
         List<TicketCategory> ticketCategories = ticketCategoryRepository.findAllTicketCategories(event.getId());
         assertEquals(1, ticketCategories.size());
         assertEquals(0, ticketCategories.get(0).getMaxTickets());
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), eventAndUsername.getRight(), jdbcTemplate);
     }
 
     @Test
-    public void testEventGenerationWithUnboundedCategory() {
+    void testEventGenerationWithUnboundedCategory() {
         List<TicketCategoryModification> categories = Arrays.asList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -166,7 +176,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testEventGenerationWithOverflow() {
+    void testEventGenerationWithOverflow() {
         List<TicketCategoryModification> categories = Arrays.asList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -192,7 +202,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
      *
      */
     @Test
-    public void testAddUnboundedCategory() {
+    void testAddUnboundedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -213,7 +223,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testAddUnboundedCategoryShrinkBoundedCategory() {
+    void testAddUnboundedCategoryShrinkBoundedCategory() {
         //create the event with a single category which contains all the tickets
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
@@ -247,7 +257,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testIncreaseEventSeatsWithAnUnboundedCategory() {
+    void testIncreaseEventSeatsWithAnUnboundedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -272,7 +282,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testIncreaseEventSeatsWithABoundedCategory() {
+    void testIncreaseEventSeatsWithABoundedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -294,7 +304,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testDecreaseEventSeatsWithAnUnboundedCategory() {
+    void testDecreaseEventSeatsWithAnUnboundedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -315,7 +325,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testDecreaseEventSeatsWithABoundedCategory() {
+    void testDecreaseEventSeatsWithABoundedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -336,7 +346,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testAddBoundedCategoryToUnboundedEvent() {
+    void testAddBoundedCategoryToUnboundedEvent() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 0,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -359,7 +369,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testUpdateBoundedCategory() {
+    void testUpdateBoundedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
                 new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                         new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -382,7 +392,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testUpdateEventHeader() {
+    void testUpdateEventHeader() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -442,7 +452,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testUpdateBoundedFlagToTrue() {
+    void testUpdateBoundedFlagToTrue() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -464,7 +474,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testUpdateBoundedFlagToFalse() {
+    void testUpdateBoundedFlagToFalse() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -490,7 +500,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testValidationBoundedFailedRestrictedFlag() {
+    void testValidationBoundedFailedRestrictedFlag() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -514,7 +524,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testValidationBoundedFailedPendingTickets() {
+    void testValidationBoundedFailedPendingTickets() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -530,7 +540,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
         List<Integer> tickets = ticketRepository.selectTicketInCategoryForUpdate(event.getId(), category.getId(), 1, Collections.singletonList(Ticket.TicketStatus.FREE.name()));
         String reservationId = "12345678";
         ticketReservationRepository.createNewReservation(reservationId, ZonedDateTime.now(clockProvider.getClock()), DateUtils.addDays(new Date(), 1), null, "en", event.getId(), event.getVat(), event.isVatIncluded(), event.getCurrency(), event.getOrganizationId(), null);
-        ticketRepository.reserveTickets(reservationId, tickets, category.getId(), "en", 100, "CHF");
+        ticketRepository.reserveTickets(reservationId, tickets, category, "en", event.getVatStatus(), i -> null);
         TicketCategoryModification tcm = new TicketCategoryModification(category.getId(), category.getName(), TicketCategory.TicketAccessType.INHERIT, 10,
             DateTimeModification.fromZonedDateTime(category.getUtcInception()),
             DateTimeModification.fromZonedDateTime(category.getUtcExpiration()),
@@ -540,7 +550,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testIncreaseRestrictedCategory() {
+    void testIncreaseRestrictedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -565,7 +575,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testDecreaseRestrictedCategory() {
+    void testDecreaseRestrictedCategory() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -592,7 +602,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
 
     //https://github.com/alfio-event/alf.io/issues/335
     @Test
-    public void testDecreaseRestrictedCategoryWithAlreadySentToken() {
+    void testDecreaseRestrictedCategoryWithAlreadySentToken() {
 
         ensureMinimalConfiguration(configurationRepository);
 
@@ -637,7 +647,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testNewCategoryBoundedAddReleasedTickets() {
+    void testNewCategoryBoundedAddReleasedTickets() {
         Pair<Event, String> eventAndUser = generateAndEditEvent(AVAILABLE_SEATS + 10);
         //now we have 20 free seats, 10 of which RELEASED
         Event event = eventAndUser.getLeft();
@@ -652,7 +662,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testNewRestrictedCategory() {
+    void testNewRestrictedCategory() {
         Pair<Event, String> eventAndUser = generateAndEditEvent(AVAILABLE_SEATS + 10);
         //now we have 20 free seats, 10 of which RELEASED
         Event event = eventAndUser.getLeft();
@@ -667,7 +677,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testNewBoundedCategoryWithExistingBoundedAndPendingTicket() {
+    void testNewBoundedCategoryWithExistingBoundedAndPendingTicket() {
         List<TicketCategoryModification> categories = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -678,7 +688,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
         String username = pair.getRight();
         assertEquals(Integer.valueOf(AVAILABLE_SEATS), ticketRepository.countFreeTicketsForUnbounded(event.getId()));
         TicketReservationModification trm = new TicketReservationModification();
-        trm.setAmount(1);
+        trm.setQuantity(1);
         trm.setTicketCategoryId(ticketCategoryRepository.findAllTicketCategories(event.getId()).get(0).getId());
         TicketReservationWithOptionalCodeModification reservation = new TicketReservationWithOptionalCodeModification(trm, Optional.empty());
         ticketReservationManager.createTicketReservation(event, Collections.singletonList(reservation), Collections.emptyList(),
@@ -697,24 +707,52 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void deleteUnboundedTicketCategorySuccess() {
+    void deleteUnboundedTicketCategorySuccess() {
         List<TicketCategoryModification> cat = List.of(
-            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
+            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 1,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
-                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, 1,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", true, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
         Pair<Event, String> pair = initEvent(cat, organizationRepository, userManager, eventManager, eventRepository);
         var event = pair.getLeft();
         var categories = ticketCategoryRepository.findAllTicketCategories(event.getId());
-        assertEquals(1, categories.size());
+        assertEquals(2, categories.size());
         int categoryId = categories.get(0).getId();
         eventManager.deleteCategory(event.getShortName(), categoryId, pair.getRight());
-        assertEquals(0, ticketCategoryRepository.findAllTicketCategories(event.getId()).size());
-        assertEquals(AVAILABLE_SEATS, (int) ticketRepository.countFreeTicketsForUnbounded(event.getId()));
+        assertEquals(1, ticketCategoryRepository.findAllTicketCategories(event.getId()).size());
+        assertEquals(AVAILABLE_SEATS - 1, (int) ticketRepository.countFreeTicketsForUnbounded(event.getId()));
     }
 
     @Test
-    public void deleteUnboundedTicketCategoryFailure() {
+    void deleteUnboundedTicketCategoryFailure() {
+        List<TicketCategoryModification> cat = List.of(
+            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 1,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, 1,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", true, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
+        Pair<Event, String> pair = initEvent(cat, organizationRepository, userManager, eventManager, eventRepository);
+        var event = pair.getLeft();
+        var tickets = ticketRepository.selectNotAllocatedTicketsForUpdate(event.getId(), 1, List.of(Ticket.TicketStatus.FREE.name()));
+        var categories = ticketCategoryRepository.findAllTicketCategories(event.getId());
+        assertEquals(2, categories.size());
+        int categoryId = categories.get(0).getId();
+        String reservationId = UUID.randomUUID().toString();
+        ticketReservationRepository.createNewReservation(reservationId, ZonedDateTime.now(clockProvider.getClock()), DateUtils.addDays(new Date(), 1), null, "en", event.getId(), event.getVat(), event.isVatIncluded(), event.getCurrency(), event.getOrganizationId(), null);
+        int result = ticketRepository.reserveTickets(reservationId, tickets, categories.get(0), "en", event.getVatStatus(), i -> null);
+        assertEquals(1, result);
+        assertThrows(IllegalStateException.class, () -> eventManager.deleteCategory(event.getShortName(), categoryId, pair.getRight()));
+    }
+
+    @Test
+    void deleteUnboundedTicketCategoryFailureBecauseSingle() {
         List<TicketCategoryModification> cat = Collections.singletonList(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -728,51 +766,59 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
         int categoryId = categories.get(0).getId();
         String reservationId = UUID.randomUUID().toString();
         ticketReservationRepository.createNewReservation(reservationId, ZonedDateTime.now(clockProvider.getClock()), DateUtils.addDays(new Date(), 1), null, "en", event.getId(), event.getVat(), event.isVatIncluded(), event.getCurrency(), event.getOrganizationId(), null);
-        int result = ticketRepository.reserveTickets(reservationId, tickets, categoryId, "en", 0, "CHF");
+        int result = ticketRepository.reserveTickets(reservationId, tickets, categories.get(0), "en", event.getVatStatus(), i -> null);
         assertEquals(1, result);
-        assertThrows(IllegalStateException.class, () -> eventManager.deleteCategory(event.getShortName(), categoryId, pair.getRight()));
+        assertThrows(IllegalArgumentException.class, () -> eventManager.deleteCategory(event.getShortName(), categoryId, pair.getRight()));
     }
 
     @Test
-    public void deleteBoundedTicketCategorySuccess() {
+    void deleteBoundedTicketCategorySuccess() {
         List<TicketCategoryModification> cat = List.of(
-            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
+            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 1,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", true, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, 1,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                 DESCRIPTION, BigDecimal.TEN, false, "", true, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
         Pair<Event, String> pair = initEvent(cat, organizationRepository, userManager, eventManager, eventRepository);
         var event = pair.getLeft();
         var categories = ticketCategoryRepository.findAllTicketCategories(event.getId());
-        assertEquals(1, categories.size());
+        assertEquals(2, categories.size());
         int categoryId = categories.get(0).getId();
         eventManager.deleteCategory(event.getShortName(), categoryId, pair.getRight());
-        assertEquals(0, ticketCategoryRepository.findAllTicketCategories(event.getId()).size());
+        assertEquals(1, ticketCategoryRepository.findAllTicketCategories(event.getId()).size());
         waitingQueueSubscriptionProcessor.handleWaitingTickets();
-        assertEquals(AVAILABLE_SEATS, (int) ticketRepository.countFreeTicketsForUnbounded(event.getId()));
+        assertEquals(AVAILABLE_SEATS - 1, (int) ticketRepository.countFreeTicketsForUnbounded(event.getId()));
     }
 
     @Test
-    public void deleteBoundedTicketCategoryFailure() {
-        List<TicketCategoryModification> cat = Collections.singletonList(
-            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
+    void deleteBoundedTicketCategoryFailure() {
+        List<TicketCategoryModification> cat = List.of(
+            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 1,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", true, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, 1,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
                 DESCRIPTION, BigDecimal.TEN, false, "", true, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
         Pair<Event, String> pair = initEvent(cat, organizationRepository, userManager, eventManager, eventRepository);
         var event = pair.getLeft();
         var categories = ticketCategoryRepository.findAllTicketCategories(event.getId());
-        assertEquals(1, categories.size());
+        assertEquals(2, categories.size());
         int categoryId = categories.get(0).getId();
         var tickets = ticketRepository.selectTicketInCategoryForUpdate(event.getId(), categoryId, 1, List.of(Ticket.TicketStatus.FREE.name()));
         String reservationId = UUID.randomUUID().toString();
         ticketReservationRepository.createNewReservation(reservationId, ZonedDateTime.now(clockProvider.getClock()), DateUtils.addDays(new Date(), 1), null, "en", event.getId(), event.getVat(), event.isVatIncluded(), event.getCurrency(), event.getOrganizationId(), null);
-        int result = ticketRepository.reserveTickets(reservationId, tickets, categoryId, "en", 0, "CHF");
+        int result = ticketRepository.reserveTickets(reservationId, tickets, categories.get(0), "en", event.getVatStatus(), i -> null);
         assertEquals(1, result);
         assertThrows(IllegalStateException.class, () -> eventManager.deleteCategory(event.getShortName(), categoryId, pair.getRight()));
     }
 
     @Test
-    public void deletedBoundedCategoriesNotIncludedInStatistics() {
+    void deletedBoundedCategoriesNotIncludedInStatistics() {
         /*
         String reservationId = UUID.randomUUID().toString();
         var tickets = ticketRepository.selectNotAllocatedTicketsForUpdate(event.getId(), 1, List.of(Ticket.TicketStatus.FREE.name()));
@@ -827,7 +873,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void rearrangeTicketCategories() {
+    void rearrangeTicketCategories() {
         List<TicketCategoryModification> cat = List.of(
             new TicketCategoryModification(null, "first", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -859,7 +905,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void updateEventFormat() {
+    void updateEventFormat() {
         var categories = List.of(
             new TicketCategoryModification(null, "first", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS,
                 new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
@@ -871,7 +917,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
 
         // add ON_SITE payment method
         var withOnSite = List.of(PaymentProxy.OFFLINE, PaymentProxy.ON_SITE);
-        var onSitePaymentMethodModification = createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.IN_PERSON, withOnSite);
+        var onSitePaymentMethodModification = createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.IN_PERSON, withOnSite, event.getLocation());
         var username = eventAndUsername.getRight();
         eventManager.updateEventPrices(event, onSitePaymentMethodModification, username);
 
@@ -879,7 +925,7 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
         assertEquals(withOnSite, event.getAllowedPaymentProxies());
 
         try {
-            eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.ONLINE, withOnSite), username);
+            eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.ONLINE, withOnSite, event.getLocation()), username);
             fail();
         } catch(IllegalArgumentException ex) {
             assertEquals(EventManager.ERROR_ONLINE_ON_SITE_NOT_COMPATIBLE, ex.getMessage());
@@ -887,11 +933,95 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
 
         event = eventRepository.findById(event.getId());
         // update header and remove ON_SITE
-        eventManager.updateEventPrices(event, createEventModification(AVAILABLE_SEATS, event, event.getFormat(), List.of(PaymentProxy.OFFLINE)), username);
+        eventManager.updateEventPrices(event, createEventModification(AVAILABLE_SEATS, event, event.getFormat(), List.of(PaymentProxy.OFFLINE), event.getLocation()), username);
         // retry
         event = eventRepository.findById(event.getId());
-        eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.ONLINE, event.getAllowedPaymentProxies()), username);
+        eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.ONLINE, event.getAllowedPaymentProxies(), event.getLocation()), username);
     }
+
+    @Test
+    void updateInPersonEventToHybridAndBack() {
+        var categories = List.of(
+            new TicketCategoryModification(null, "first", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 10,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 2, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 10,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 2, null, null, AlfioMetadata.empty())
+            );
+
+        var eventAndUsername = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository);
+        var event = eventAndUsername.getLeft();
+        var username = eventAndUsername.getRight();
+
+        eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.HYBRID, event.getAllowedPaymentProxies(), event.getLocation()), username);
+
+        // check that all the categories have been converted to IN_PERSON
+        assertTrue(ticketCategoryRepository.findAllTicketCategories(event.getId()).stream().allMatch(tc -> tc.getTicketAccessType() == TicketCategory.TicketAccessType.IN_PERSON));
+
+        event = eventRepository.findById(event.getId());
+
+        // revert modification
+        eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.IN_PERSON, event.getAllowedPaymentProxies(), event.getLocation()), username);
+        // we expect all the access types to be INHERIT
+        assertTrue(ticketCategoryRepository.findAllTicketCategories(event.getId()).stream().allMatch(tc -> tc.getTicketAccessType() == TicketCategory.TicketAccessType.INHERIT));
+
+    }
+
+    @Test
+    void testFailedUpdateOnlineEventToHybrid() {
+        var categories = List.of(
+            new TicketCategoryModification(null, "first", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 10,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 2, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 10,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 2, null, null, AlfioMetadata.empty())
+        );
+        var eventAndUsername = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository, List.of(), Event.EventFormat.ONLINE);
+        var event = eventAndUsername.getLeft();
+        var username = eventAndUsername.getRight();
+
+        // This must give an error because the "check_location_if_in_person" constraint will kick in
+        assertThrows(DataIntegrityViolationException.class, () -> eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.HYBRID, event.getAllowedPaymentProxies(), null), username));
+    }
+
+    @Test
+    void updateOnlineEventToHybridAndBack() {
+        var categories = List.of(
+            new TicketCategoryModification(null, "first", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 10,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 2, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, AVAILABLE_SEATS - 10,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 2, null, null, AlfioMetadata.empty())
+        );
+
+        var eventAndUsername = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository, List.of(), Event.EventFormat.ONLINE);
+        var event = eventAndUsername.getLeft();
+        var username = eventAndUsername.getRight();
+
+        // if we set the location, everything should work as expected
+        eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.HYBRID, event.getAllowedPaymentProxies(), "location"), username);
+
+        // check that all the categories have been converted to ONLINE
+        assertTrue(ticketCategoryRepository.findAllTicketCategories(event.getId()).stream().allMatch(tc -> tc.getTicketAccessType() == TicketCategory.TicketAccessType.ONLINE));
+
+        event = eventRepository.findById(event.getId());
+
+        // revert modification
+        eventManager.updateEventHeader(event, createEventModification(AVAILABLE_SEATS, event, Event.EventFormat.ONLINE, event.getAllowedPaymentProxies(), null), username);
+        // we expect all the access types to be INHERIT
+        assertTrue(ticketCategoryRepository.findAllTicketCategories(event.getId()).stream().allMatch(tc -> tc.getTicketAccessType() == TicketCategory.TicketAccessType.INHERIT));
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), username, jdbcTemplate);
+    }
+
 
     private Pair<Event, String> generateAndEditEvent(int newEventSize) {
         List<TicketCategoryModification> categories = Collections.singletonList(
@@ -918,11 +1048,11 @@ public class EventManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     private EventModification createEventModification(int availableSeats, Event event) {
-        return createEventModification(availableSeats, event, Event.EventFormat.IN_PERSON, event.getAllowedPaymentProxies());
+        return createEventModification(availableSeats, event, Event.EventFormat.IN_PERSON, event.getAllowedPaymentProxies(), event.getLocation());
     }
 
-    private EventModification createEventModification(int availableSeats, Event event, Event.EventFormat format, List<PaymentProxy> allowedPaymentProxies) {
-        return new EventModification(event.getId(), format, "http://website-url", null, "http://website-url/tc", null, null, null, null, null, event.getOrganizationId(), null, null,
+    private EventModification createEventModification(int availableSeats, Event event, Event.EventFormat format, List<PaymentProxy> allowedPaymentProxies, String location) {
+        return new EventModification(event.getId(), format, "http://website-url", null, "http://website-url/tc", null, null, null, null, null, event.getOrganizationId(), location, null,
             null, event.getZoneId().toString(), Collections.emptyMap(), DateTimeModification.fromZonedDateTime(event.getBegin()), DateTimeModification.fromZonedDateTime(event.getEnd()),
             event.getRegularPrice(), event.getCurrency(), availableSeats, event.getVat(), event.isVatIncluded(), allowedPaymentProxies, null, event.isFreeOfCharge(), null, 7, null, null, AlfioMetadata.empty(), List.of());
     }

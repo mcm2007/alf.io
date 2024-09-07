@@ -19,15 +19,16 @@ package alfio.manager.system;
 import alfio.config.Initializer;
 import alfio.manager.support.extension.ExtensionCapability;
 import alfio.manager.support.extension.ExtensionEvent;
+import alfio.model.ExtensionCapabilitySummary;
+import alfio.model.ExtensionCapabilitySummary.ExtensionCapabilityDetails;
 import alfio.model.ExtensionSupport;
 import alfio.model.system.Configuration;
 import alfio.model.system.ConfigurationKeyValuePathLevel;
 import alfio.model.system.ConfigurationPathLevel;
 import lombok.Data;
-import lombok.Getter;
-import lombok.Setter;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
@@ -36,18 +37,34 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static java.util.Objects.requireNonNullElse;
+import static java.util.stream.Collectors.*;
 import static org.apache.commons.lang3.StringUtils.isNotBlank;
 
 @Component
 @Profile("!"+ Initializer.PROFILE_INTEGRATION_TEST)
 @ConfigurationProperties("alfio.override.system")
-@Getter
-@Setter
 public class ExternalConfiguration {
     private static final String EXTERNAL_EXTENSION_PATH = "::EXTERNAL::";
     private static final int EXTERNAL_CONFIGURATION_ID = Integer.MIN_VALUE;
     private Map<String, String> settings = new HashMap<>();
     private List<ExtensionOverride> extensions = new ArrayList<>();
+
+    public Map<String, String> getSettings() {
+        return settings;
+    }
+
+    public void setSettings(Map<String, String> settings) {
+        this.settings = settings;
+    }
+
+    public List<ExtensionOverride> getExtensions() {
+        return extensions;
+    }
+
+    public void setExtensions(List<ExtensionOverride> extensions) {
+        this.extensions = extensions;
+    }
 
     public List<Configuration> load(String key) {
         return getSingle(key).map(List::of).orElse(List.of());
@@ -91,10 +108,16 @@ public class ExternalConfiguration {
             .collect(Collectors.toList());
     }
 
-    public Set<ExtensionCapability> getSupportedCapabilities(Set<ExtensionCapability> requested) {
-        return requested.stream()
-            .filter(ec -> extensions.stream().anyMatch(e -> e.isValid() && CollectionUtils.containsAny(e.events, ec.getCompatibleEventNames()) && e.getCapabilities().contains(ec.name())))
-            .collect(Collectors.toSet());
+    public Set<ExtensionCapabilitySummary> getSupportedCapabilities(Set<ExtensionCapability> requested) {
+        return extensions.stream()
+            .map(e -> Pair.of(e, e.getCapabilityDetails().stream().filter(cd -> requested.contains(cd.key)).collect(Collectors.toList())))
+            .filter(p -> !p.getRight().isEmpty())
+            .flatMap(p -> {
+                Map<ExtensionCapability, List<ExtensionCapabilityDetails>> byCapability = p.getRight().stream()
+                    .collect(groupingBy(ExtensionCapabilityDetailsOverride::getKey, mapping(cd -> new ExtensionCapabilityDetails(cd.label, cd.description, cd.selector), toList())));
+                return byCapability.entrySet().stream()
+                    .map(e -> new ExtensionCapabilitySummary(e.getKey(), e.getValue()));
+            }).collect(Collectors.toSet());
     }
 
     public Map<String, String> getParametersForExtension(String id) {
@@ -112,8 +135,8 @@ public class ExternalConfiguration {
         private List<String> events;
         private boolean async;
         private Map<String, String> params;
-        private List<String> capabilities;
         private String type = "plain"; // plain or base64
+        private List<ExtensionCapabilityDetailsOverride> capabilityDetails;
 
         boolean isValid() {
             return isNotBlank(id)
@@ -122,7 +145,7 @@ public class ExternalConfiguration {
         }
 
         Map<String, String> getParams() {
-            return Objects.requireNonNullElse(params, Map.of());
+            return requireNonNullElse(params, Map.of());
         }
 
         String getContent() {
@@ -132,9 +155,23 @@ public class ExternalConfiguration {
             return file;
         }
 
-        List<String> getCapabilities() {
-            return capabilities == null ? List.of() : capabilities;
+        Set<String> getCapabilities() {
+            return getCapabilityDetails().stream()
+                .map(ec -> ec.key.name())
+                .collect(Collectors.toSet());
         }
+
+        List<ExtensionCapabilityDetailsOverride> getCapabilityDetails() {
+            return requireNonNullElse(capabilityDetails, List.of());
+        }
+    }
+
+    @Data
+    public static class ExtensionCapabilityDetailsOverride {
+        private ExtensionCapability key;
+        private String label;
+        private String description;
+        private String selector;
     }
 
     public static boolean isExternalPath(String path) {

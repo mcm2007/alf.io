@@ -17,12 +17,12 @@
 package alfio.manager;
 
 import alfio.model.AdditionalService;
+import alfio.model.AdditionalServiceItem;
 import alfio.model.AdditionalServiceItemExport;
 import alfio.model.AdditionalServiceText;
 import alfio.repository.AdditionalServiceItemRepository;
 import alfio.repository.AdditionalServiceRepository;
 import alfio.repository.AdditionalServiceTextRepository;
-import lombok.AllArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -33,13 +33,20 @@ import java.util.Map;
 import java.util.Optional;
 
 @Component
-@AllArgsConstructor
 @Transactional
 public class AdditionalServiceManager {
 
     private final AdditionalServiceRepository additionalServiceRepository;
     private final AdditionalServiceTextRepository additionalServiceTextRepository;
     private final AdditionalServiceItemRepository additionalServiceItemRepository;
+
+    public AdditionalServiceManager(AdditionalServiceRepository additionalServiceRepository,
+                                    AdditionalServiceTextRepository additionalServiceTextRepository,
+                                    AdditionalServiceItemRepository additionalServiceItemRepository) {
+        this.additionalServiceRepository = additionalServiceRepository;
+        this.additionalServiceTextRepository = additionalServiceTextRepository;
+        this.additionalServiceItemRepository = additionalServiceItemRepository;
+    }
 
 
     public List<AdditionalService> loadAllForEvent(int eventId) {
@@ -50,7 +57,7 @@ public class AdditionalServiceManager {
         return additionalServiceTextRepository.findAllByAdditionalServiceId(additionalServiceId);
     }
 
-    public Map<Integer, Integer> countUsageForEvent(int eventId) {
+    public Map<Integer, Map<AdditionalServiceItem.AdditionalServiceItemStatus, Integer>> countUsageForEvent(int eventId) {
         return additionalServiceRepository.getCount(eventId);
     }
 

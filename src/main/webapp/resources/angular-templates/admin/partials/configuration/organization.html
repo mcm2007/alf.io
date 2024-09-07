@@ -103,6 +103,9 @@
                         <div>
                             <setting obj="organizationConf.mail.enableHtmlEmails" data-display-delete-if-needed="true" data-delete-handler="organizationConf.delete(config)"></setting>
                         </div>
+                        <div>
+                            <setting obj="organizationConf.mail.mailFooter" data-display-delete-if-needed="true" data-delete-handler="organizationConf.delete(config)"></setting>
+                        </div>
                     </div>
                     <div data-ng-repeat="setting in organizationConf.mail.settings" data-ng-if="!organizationConf.mail.type">
                         <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="organizationConf.delete(config)"></setting>
@@ -119,7 +122,7 @@
                 </div>
                 <div class="panel panel-default">
                     <div class="panel-heading">
-                        <div class="panel-title"><i class="fa fa-eur"></i> EU-Specific invoice settings</div>
+                        <div class="panel-title"><i class="fa fa-eur"></i> VAT settings for B2B customers</div>
                     </div>
                     <div class="panel-body">
                         <div data-ng-repeat="setting in organizationConf.invoiceEu.settings">
@@ -245,6 +248,18 @@
                     <div class="panel-body">
                         <div data-ng-repeat="setting in organizationConf.paymentSaferpay.settings">
                             <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="organizationConf.delete(config)"  ></setting>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="page-header" id="SUBSCRIPTIONS">
+                    <h2>Subscriptions</h2>
+                </div>
+                <div>
+                    <div data-ng-repeat="setting in organizationConf.subscriptions.settings">
+                        <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="organizationConf.delete(config)"></setting>
+                        <div data-ng-if="setting.key === 'GENERATE_TICKETS_FOR_SUBSCRIPTIONS' && setting.id > -1 && setting.value === 'true'">
+                            <button class="btn btn-default" type="button" ng-click="organizationConf.generateTicketsForSubscribers()">Force generation</button>
                         </div>
                     </div>
                 </div>

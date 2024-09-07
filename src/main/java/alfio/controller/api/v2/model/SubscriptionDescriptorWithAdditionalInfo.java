@@ -22,17 +22,16 @@ import alfio.model.PurchaseContext;
 import alfio.model.subscription.SubscriptionDescriptor;
 import alfio.util.MonetaryUtil;
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import lombok.AllArgsConstructor;
 
 import java.util.List;
 import java.util.Map;
 
-@AllArgsConstructor
 public class SubscriptionDescriptorWithAdditionalInfo implements ApiPurchaseContext {
     private final SubscriptionDescriptor subscriptionDescriptor;
     private final InvoicingConfiguration invoicingConfiguration;
     private final AnalyticsConfiguration analyticsConfiguration;
     private final EventWithAdditionalInfo.CaptchaConfiguration captchaConfiguration;
+    private final EmbeddingConfiguration embeddingConfiguration;
 
     //payment related information
     private final String bankAccount;
@@ -49,6 +48,40 @@ public class SubscriptionDescriptorWithAdditionalInfo implements ApiPurchaseCont
     private final Map<String, String> formattedValidFrom;
     private final Map<String, String> formattedValidTo;
     private final Integer numAvailable;
+
+    public SubscriptionDescriptorWithAdditionalInfo(SubscriptionDescriptor subscriptionDescriptor,
+                                                    InvoicingConfiguration invoicingConfiguration,
+                                                    AnalyticsConfiguration analyticsConfiguration,
+                                                    EventWithAdditionalInfo.CaptchaConfiguration captchaConfiguration,
+                                                    EmbeddingConfiguration embeddingConfiguration,
+                                                    String bankAccount,
+                                                    List<String> bankAccountOwner,
+                                                    String organizationEmail,
+                                                    String organizationName,
+                                                    DatesWithTimeZoneOffset salePeriod,
+                                                    Map<String, String> formattedOnSaleFrom,
+                                                    Map<String, String> formattedOnSaleTo,
+                                                    String timeZone,
+                                                    Map<String, String> formattedValidFrom,
+                                                    Map<String, String> formattedValidTo,
+                                                    Integer numAvailable) {
+        this.subscriptionDescriptor = subscriptionDescriptor;
+        this.invoicingConfiguration = invoicingConfiguration;
+        this.analyticsConfiguration = analyticsConfiguration;
+        this.captchaConfiguration = captchaConfiguration;
+        this.embeddingConfiguration = embeddingConfiguration;
+        this.bankAccount = bankAccount;
+        this.bankAccountOwner = bankAccountOwner;
+        this.organizationEmail = organizationEmail;
+        this.organizationName = organizationName;
+        this.salePeriod = salePeriod;
+        this.formattedOnSaleFrom = formattedOnSaleFrom;
+        this.formattedOnSaleTo = formattedOnSaleTo;
+        this.timeZone = timeZone;
+        this.formattedValidFrom = formattedValidFrom;
+        this.formattedValidTo = formattedValidTo;
+        this.numAvailable = numAvailable;
+    }
 
     @Override
     public InvoicingConfiguration getInvoicingConfiguration() {
@@ -185,6 +218,17 @@ public class SubscriptionDescriptorWithAdditionalInfo implements ApiPurchaseCont
 
     public Integer getMaxEntries() {
         return subscriptionDescriptor.getMaxEntries() > 0 ? subscriptionDescriptor.getMaxEntries() : null;
+    }
+
+    @Override
+    public OfflinePaymentConfiguration getOfflinePaymentConfiguration() {
+        // offline payment is not supported for subscriptions
+        return null;
+    }
+
+    @Override
+    public EmbeddingConfiguration getEmbeddingConfiguration() {
+        return embeddingConfiguration;
     }
 
     @Override

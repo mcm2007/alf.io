@@ -20,7 +20,10 @@ import alfio.manager.support.*;
 import alfio.manager.system.ConfigurationManager;
 import alfio.model.*;
 import alfio.model.Ticket.TicketStatus;
+import alfio.model.api.v1.admin.CheckInLogEntry;
 import alfio.model.audit.ScanAudit;
+import alfio.model.checkin.AttendeeSearchResults;
+import alfio.model.decorator.TicketPriceContainer;
 import alfio.model.support.CheckInOutputColorConfiguration;
 import alfio.model.transaction.PaymentProxy;
 import alfio.repository.*;
@@ -29,21 +32,20 @@ import alfio.repository.user.OrganizationRepository;
 import alfio.repository.user.UserRepository;
 import alfio.util.*;
 import com.google.gson.reflect.TypeToken;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.crypto.Cipher;
 import javax.crypto.SecretKey;
 import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
@@ -66,11 +68,12 @@ import static org.apache.commons.lang3.StringUtils.trimToEmpty;
 
 @Component
 @Transactional
-@Log4j2
-@AllArgsConstructor
 public class CheckInManager {
 
-    private static final Pattern CYPHER_SPLITTER = Pattern.compile("\\|");
+    private static final Logger log = LoggerFactory.getLogger(CheckInManager.class);
+
+    static final Pattern CYPHER_SPLITTER = Pattern.compile("\\|");
+    private static final int SEARCH_ATTENDEES_LIMIT = 20;
     private final TicketRepository ticketRepository;
     private final EventRepository eventRepository;
     private final TicketReservationRepository ticketReservationRepository;
@@ -87,6 +90,38 @@ public class CheckInManager {
     private final PollRepository pollRepository;
     private final ClockProvider clockProvider;
 
+    public CheckInManager(TicketRepository ticketRepository,
+                          EventRepository eventRepository,
+                          TicketReservationRepository ticketReservationRepository,
+                          TicketFieldRepository ticketFieldRepository,
+                          TicketCategoryRepository ticketCategoryRepository,
+                          ScanAuditRepository scanAuditRepository,
+                          AuditingRepository auditingRepository,
+                          ConfigurationManager configurationManager,
+                          OrganizationRepository organizationRepository,
+                          UserRepository userRepository,
+                          TicketReservationManager ticketReservationManager,
+                          ExtensionManager extensionManager,
+                          AdditionalServiceItemRepository additionalServiceItemRepository,
+                          PollRepository pollRepository,
+                          ClockProvider clockProvider) {
+        this.ticketRepository = ticketRepository;
+        this.eventRepository = eventRepository;
+        this.ticketReservationRepository = ticketReservationRepository;
+        this.ticketFieldRepository = ticketFieldRepository;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.scanAuditRepository = scanAuditRepository;
+        this.auditingRepository = auditingRepository;
+        this.configurationManager = configurationManager;
+        this.organizationRepository = organizationRepository;
+        this.userRepository = userRepository;
+        this.ticketReservationManager = ticketReservationManager;
+        this.extensionManager = extensionManager;
+        this.additionalServiceItemRepository = additionalServiceItemRepository;
+        this.pollRepository = pollRepository;
+        this.clockProvider = clockProvider;
+    }
+
 
     private void checkIn(String uuid) {
         Ticket ticket = ticketRepository.findByUUID(uuid);
@@ -100,7 +135,31 @@ public class CheckInManager {
         Ticket ticket = ticketRepository.findByUUID(uuid);
         Validate.isTrue(ticket.getStatus() == TicketStatus.TO_BE_PAID);
         ticketRepository.updateTicketStatusWithUUID(uuid, TicketStatus.ACQUIRED.toString());
-        ticketReservationManager.registerAlfioTransaction(eventRepository.findById(ticket.getEventId()), ticket.getTicketsReservationId(), PaymentProxy.ON_SITE);
+        ticketReservationManager.registerAlfioTransactionForOnsitePayment(eventRepository.findById(ticket.getEventId()), ticket.getTicketsReservationId());
+    }
+
+    public AttendeeSearchResults searchAttendees(Event event, String query, int page) {
+        if (StringUtils.isBlank(query)) {
+            return new AttendeeSearchResults(0, 0, 0, 0, List.of());
+        }
+        int eventId = event.getId();
+        var search = "%" + query + "%";
+        var results = ticketRepository.searchAttendees(eventId, search, SEARCH_ATTENDEES_LIMIT, SEARCH_ATTENDEES_LIMIT * page);
+        var statistics = ticketRepository.countSearchResults(eventId, search);
+        var attendees = results.stream().map(fi -> {
+            var ticket = fi.getTicket();
+            var reservation = fi.getTicketReservation();
+            String amountToPay = null;
+            if (reservation.getPaymentMethod() == PaymentProxy.ON_SITE) {
+                var priceContainer = TicketPriceContainer.from(ticket, reservation.getVatStatus(), reservation.getVAT(), event.getVatStatus(), reservation.getDiscount().orElse(null));
+                amountToPay = event.getCurrency() + " " + MonetaryUtil.formatUnit(priceContainer.getFinalPrice(), event.getCurrency());
+            }
+            return new AttendeeSearchResults.Attendee(ticket.getUuid(), ticket.getFirstName(),
+                ticket.getLastName(), fi.getTicketCategory().getName(), fi.getTicketAdditionalInfo(),
+                ticket.getStatus(), amountToPay);
+        }).collect(Collectors.toList());
+        int totalPages = (int) Math.ceil((statistics.getTotal() / (double) SEARCH_ATTENDEES_LIMIT));
+        return new AttendeeSearchResults(statistics.getTotal(), statistics.getCheckedIn(), totalPages, page, attendees);
     }
 
     /**
@@ -276,7 +335,7 @@ public class CheckInManager {
                     tc.getName(), from, to, formattedNow)));
         }
 
-        if (!code.equals(ticket.ticketCode(event.getPrivateKey()))) {
+        if (!code.equals(ticket.ticketCode(event.getPrivateKey(), event.supportsQRCodeCaseInsensitive()))) {
             return new TicketAndCheckInResult(null, new DefaultCheckInResult(INVALID_TICKET_CODE, "Ticket qr code does not match"));
         }
 
@@ -309,7 +368,7 @@ public class CheckInManager {
         return Optional.ofNullable(in).map(d -> d.withZoneSameInstant(zoneId));
     }
 
-    private static Pair<Cipher, SecretKeySpec>  getCypher(String key) {
+    static Pair<Cipher, SecretKeySpec>  getCypher(String key) {
         try {
             SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1");
             int iterations = 1000;
@@ -337,33 +396,18 @@ public class CheckInManager {
         }
     }
 
-    public static String decrypt(String key, String payload) {
-        try {
-            Pair<Cipher, SecretKeySpec> cipherAndSecret = getCypher(key);
-            Cipher cipher = cipherAndSecret.getKey();
-            String[] split = CYPHER_SPLITTER.split(payload);
-            byte[] iv = Base64.decodeBase64(split[0]);
-            byte[] body = Base64.decodeBase64(split[1]);
-            cipher.init(Cipher.DECRYPT_MODE, cipherAndSecret.getRight(), new IvParameterSpec(iv));
-            byte[] decrypted = cipher.doFinal(body);
-            return new String(decrypted, StandardCharsets.UTF_8);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     public List<Integer> getAttendeesIdentifiers(EventAndOrganizationId ev, Date changedSince, String username) {
         return Optional.ofNullable(ev)
             .filter(EventManager.checkOwnership(username, organizationRepository))
             .filter(isOfflineCheckInEnabled())
-            .map(event -> ticketRepository.findAllAssignedByEventId(event.getId(), changedSince))
+            .map(event -> ticketRepository.findAllAssignedByEventIdForCheckIn(event.getId(), changedSince))
             .orElseGet(Collections::emptyList);
     }
 
     public List<Integer> getAttendeesIdentifiers(int eventId, Date changedSince, String username) {
         return eventRepository.findOptionalById(eventId)
             .filter(EventManager.checkOwnership(username, organizationRepository))
-            .map(event -> ticketRepository.findAllAssignedByEventId(event.getId(), changedSince))
+            .map(event -> ticketRepository.findAllAssignedByEventIdForCheckIn(event.getId(), changedSince))
             .orElse(Collections.emptyList());
     }
 
@@ -384,18 +428,18 @@ public class CheckInManager {
 
     public Map<String,String> getEncryptedAttendeesInformation(Event ev, Set<String> additionalFields, List<Integer> ids) {
 
-
         return Optional.ofNullable(ev).filter(isOfflineCheckInEnabled()).map(event -> {
+            boolean caseInsensitiveQRCode = ev.supportsQRCodeCaseInsensitive();
             Map<Integer, TicketCategory> categories = ticketCategoryRepository.findByEventIdAsMap(event.getId());
             String eventKey = event.getPrivateKey();
 
-            Function<FullTicketInfo, String> hashedHMAC = ticket -> DigestUtils.sha256Hex(ticket.hmacTicketInfo(eventKey));
+            Function<FullTicketInfo, String> hashedHMAC = ticket -> DigestUtils.sha256Hex(ticket.hmacTicketInfo(eventKey, caseInsensitiveQRCode));
             var outputColorConfiguration = getOutputColorConfiguration(event, configurationManager);
 
             // fetch polls for event, in order to determine if we have to print PIN or not
             var polls = pollRepository.findAllForEvent(event.getId());
             boolean hasPolls = !polls.isEmpty();
-            var allowedTags = hasPolls ? polls.stream().flatMap(p -> p.getAllowedTags().stream()).collect(Collectors.toList()) : List.<String>of();
+            var allowedTags = hasPolls ? polls.stream().flatMap(p -> p.allowedTags().stream()).collect(Collectors.toList()) : List.<String>of();
 
             Function<FullTicketInfo, String> encryptedBody = ticket -> {
                 Map<String, String> info = new HashMap<>();
@@ -416,6 +460,7 @@ public class CheckInManager {
                 if (!additionalFields.isEmpty()) {
                     Map<String, String> fields = new HashMap<>();
                     fields.put("company", trimToEmpty(ticket.getBillingDetails().getCompanyName()));
+                    fields.put("category", ticket.getTicketCategory().getName());
                     fields.putAll(ticketFieldRepository.findValueForTicketId(ticket.getId(), additionalFields).stream()
                         .map(vd -> {
                             try {
@@ -458,7 +503,7 @@ public class CheckInManager {
                 if(!additionalServicesInfo.isEmpty()) {
                     info.put("additionalServicesInfoJson", Json.toJson(additionalServicesInfo));
                 }
-                String key = ticket.ticketCode(eventKey);
+                String key = ticket.ticketCode(eventKey, caseInsensitiveQRCode);
                 return encrypt(key, Json.toJson(info));
             };
             return ticketRepository.findAllFullTicketInfoAssignedByEventId(event.getId(), ids)
@@ -502,12 +547,12 @@ public class CheckInManager {
         List<BookedAdditionalService> additionalServices = additionalServiceItemRepository.getAdditionalServicesBookedForReservation(ticketsReservationId, ticket.getUserLanguage(), ticket.getEventId());
         boolean additionalServicesEmpty = additionalServices.isEmpty();
         if(!additionalServicesEmpty) {
-            List<Integer> additionalServiceIds = additionalServices.stream().map(BookedAdditionalService::getAdditionalServiceId).collect(Collectors.toList());
+            List<Integer> additionalServiceIds = additionalServices.stream().map(BookedAdditionalService::additionalServiceId).collect(Collectors.toList());
             Map<Integer, List<TicketFieldValueForAdditionalService>> fields = ticketFieldRepository.loadTicketFieldsForAdditionalService(ticket.getId(), additionalServiceIds)
                 .stream().collect(Collectors.groupingBy(TicketFieldValueForAdditionalService::getAdditionalServiceId));
 
             return additionalServices.stream()
-                .map(as -> new AdditionalServiceInfo(as.getAdditionalServiceName(), as.getCount(), fields.get(as.getAdditionalServiceId())))
+                .map(as -> new AdditionalServiceInfo(as.additionalServiceName(), as.count(), fields.get(as.additionalServiceId())))
                 .collect(Collectors.toList());
         }
         return List.of();
@@ -519,6 +564,13 @@ public class CheckInManager {
             .filter(EventManager.checkOwnership(username, organizationRepository))
             .map(event -> eventRepository.retrieveCheckInStatisticsForEvent(event.getId()))
             .orElse(null);
+    }
+
+    public List<CheckInLogEntry> retrieveLogEntries(String eventName, String username) {
+        return eventRepository.findOptionalEventAndOrganizationIdByShortName(eventName)
+            .filter(EventManager.checkOwnership(username, organizationRepository))
+            .map(event -> scanAuditRepository.loadEntries(event.getId()))
+            .orElse(List.of());
     }
 
     private boolean areStatsEnabled(EventAndOrganizationId event) {

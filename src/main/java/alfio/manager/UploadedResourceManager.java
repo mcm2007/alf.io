@@ -19,8 +19,9 @@ package alfio.manager;
 import alfio.model.UploadedResource;
 import alfio.model.modification.UploadBase64FileModification;
 import alfio.repository.UploadedResourceRepository;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,8 +39,9 @@ import java.util.Optional;
 
 @Component
 @Transactional
-@Log4j2
 public class UploadedResourceManager {
+
+    private static final Logger log = LoggerFactory.getLogger(UploadedResourceManager.class);
 
     public static final String ATTR_IMG_WIDTH = "width";
     public static final String ATTR_IMG_HEIGHT = "height";
@@ -93,7 +95,7 @@ public class UploadedResourceManager {
             uploadedResourceRepository.delete(file.getName());
         }
 
-        return Optional.ofNullable(uploadedResourceRepository.upload(null, null, file, getAttributes(file)));
+        return Optional.of(uploadedResourceRepository.upload(null, null, file, getAttributes(file)));
     }
 
     public Optional<Integer> saveResource(int organizationId, UploadBase64FileModification file) {
@@ -101,7 +103,7 @@ public class UploadedResourceManager {
             uploadedResourceRepository.delete(organizationId, file.getName());
         }
 
-        return Optional.ofNullable(uploadedResourceRepository.upload(organizationId, null, file, getAttributes(file)));
+        return Optional.of(uploadedResourceRepository.upload(organizationId, null, file, getAttributes(file)));
     }
 
     public Optional<Integer> saveResource(int organizationId, int eventId, UploadBase64FileModification file) {

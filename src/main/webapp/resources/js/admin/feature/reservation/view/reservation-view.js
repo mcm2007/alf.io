@@ -11,7 +11,7 @@
             onConfirm: '<'
         },
         controller: ['AdminReservationService', 'EventService', 'ReservationCancelService', '$window', '$stateParams', 'NotificationHandler', 'CountriesService', '$uibModal', 'ConfigurationService', ReservationViewCtrl],
-        templateUrl: '../resources/js/admin/feature/reservation/view/reservation-view.html'
+        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/reservation/view/reservation-view.html'
     });
 
 
@@ -85,10 +85,15 @@
             } else if(['INCLUDED_EXEMPT', 'NOT_INCLUDED_EXEMPT'].indexOf(src.vatStatus) > -1) {
                 vatApplied = 'N';
             }
+            var containsCheckedInTickets = ctrl.reservationDescriptor.ticketsByCategory.some(function(category) {
+                return category.value.some(function(t) {
+                    return t.status === 'CHECKED_IN';
+                })
+            });
             ctrl.reservation = {
                 id: src.id,
                 status: src.status,
-                showCreditCancel: src.status !== 'CANCELLED' && src.status !== 'CREDIT_NOTE_ISSUED',
+                showCreditCancel: src.status !== 'CANCELLED' && src.status !== 'CREDIT_NOTE_ISSUED' && !containsCheckedInTickets,
                 expirationStr: moment(src.validity).format('YYYY-MM-DD HH:mm'),
                 expiration: {
                     date: moment(src.validity).format('YYYY-MM-DD'),
@@ -130,6 +135,20 @@
                     })
                 }
             });
+
+            if(ctrl.purchaseContextType === 'event') {
+                // retrieve tickets with additional data
+                AdminReservationService.getTicketIdsWithAdditionalData(ctrl.purchaseContext.publicIdentifier, ctrl.reservation.id)
+                    .then(function(result) {
+                       if(result.data && result.data.length > 0) {
+                           ctrl.reservation.ticketsInfo.forEach(function(ticketInfo) {
+                               ticketInfo.attendees.forEach(function (attendee) {
+                                   attendee.hasAdditionalData = result.data.indexOf(attendee.ticketId) > -1;
+                               });
+                           });
+                       }
+                    });
+            }
 
             ctrl.displayConfirmButton = ['PENDING', 'OFFLINE_PAYMENT', 'STUCK'].indexOf(ctrl.reservation.status) > -1;
 
@@ -300,7 +319,7 @@
         function openCheckInLog(attendee) {
             $uibModal.open({
                 size: 'md',
-                templateUrl: '../resources/js/admin/feature/reservation/view/check-in-log-modal.html',
+                templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/reservation/view/check-in-log-modal.html',
                 backdrop: 'static',
                 controller: function($scope) {
                     $scope.cancel = function() {$scope.$dismiss('cancelled');};
@@ -329,7 +348,7 @@
         ctrl.notifyAttendees = function() {
             var m = $uibModal.open({
                 size: 'lg',
-                templateUrl: '../resources/js/admin/feature/reservation/view/send-ticket-email.html',
+                templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/reservation/view/send-ticket-email.html',
                 backdrop: 'static',
                 controller: function($scope) {
                     $scope.cancel = function() {$scope.$dismiss('cancelled');};
@@ -398,14 +417,25 @@
             });
         };
 
+        ctrl.openFullData = function(ticket) {
+            AdminReservationService.openFullDataView(ctrl.purchaseContext, ctrl.reservation.id, ticket.uuid)
+                .then(function() {
+                    console.log('modal closed.');
+                })
+        };
+
         ctrl.removeTicket = function(ticket) {
-            EventService.removeTicketModal(ctrl.purchaseContext, ctrl.reservation.id, ticket.ticketId, ctrl.reservation.customerData.invoiceRequested).then(function(billingDocumentRequested) {
-                var message = 'Ticket has been cancelled.';
-                if(billingDocumentRequested) {
-                    message += ' A credit note has been generated. Please check the Billing Documents tab.';
-                }
-                reloadReservation(message);
-            });
+            if (ticket.status !== 'CHECKED_IN') {
+                EventService.removeTicketModal(ctrl.purchaseContext, ctrl.reservation.id, ticket.ticketId, ctrl.reservation.customerData.invoiceRequested).then(function(billingDocumentRequested) {
+                    var message = 'Ticket has been cancelled.';
+                    if(billingDocumentRequested) {
+                        message += ' A credit note has been generated. Please check the Billing Documents tab.';
+                    }
+                    reloadReservation(message);
+                });
+            } else {
+                NotificationHandler.showError('Cannot remove a checked-in ticket');
+            }
         };
 
         ctrl.confirmRefund = function() {

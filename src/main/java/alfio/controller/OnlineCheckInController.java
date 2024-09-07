@@ -19,9 +19,9 @@ package alfio.controller;
 import alfio.manager.CheckInManager;
 import alfio.manager.ExtensionManager;
 import alfio.manager.TicketReservationManager;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -35,13 +35,19 @@ import static alfio.manager.support.CheckInStatus.SUCCESS;
 import static alfio.util.EventUtil.findMatchingLink;
 
 @Controller
-@AllArgsConstructor
-@Log4j2
 public class OnlineCheckInController {
+
+    private static final Logger log = LoggerFactory.getLogger(OnlineCheckInController.class);
 
     private final TicketReservationManager ticketReservationManager;
     private final CheckInManager checkInManager;
     private final ExtensionManager extensionManager;
+
+    public OnlineCheckInController(TicketReservationManager ticketReservationManager, CheckInManager checkInManager, ExtensionManager extensionManager) {
+        this.ticketReservationManager = ticketReservationManager;
+        this.checkInManager = checkInManager;
+        this.extensionManager = extensionManager;
+    }
 
     @GetMapping("/event/{shortName}/ticket/{ticketUUID}/check-in/{ticketCodeHash}")
     public String performCheckIn(@PathVariable("shortName") String eventShortName,
@@ -49,24 +55,24 @@ public class OnlineCheckInController {
                                  @PathVariable("ticketCodeHash") String ticketCodeHash) {
 
         return ticketReservationManager.fetchCompleteAndAssignedForOnlineCheckIn(eventShortName, ticketUUID)
-            .flatMap(info -> {
-                var ticket = info.getTicket();
-                var event = info.getEventWithCheckInInfo();
-                String ticketCode = ticket.ticketCode(event.getPrivateKey());
+            .flatMap(data -> {
+                var ticket = data.getTicket();
+                var event = data.getEventWithCheckInInfo();
+                String ticketCode = ticket.ticketCode(event.getPrivateKey(), event.supportsQRCodeCaseInsensitive());
                 if(MessageDigest.isEqual(DigestUtils.sha256Hex(ticketCode).getBytes(StandardCharsets.UTF_8), ticketCodeHash.getBytes(StandardCharsets.UTF_8))) {
                     log.debug("code successfully validated for ticket {}", ticketUUID);
                     // check-in can be done. Let's check if there is a redirection URL
-                    var categoryConfiguration = info.getCategoryMetadata().getOnlineConfiguration();
+                    var categoryConfiguration = data.getCategoryMetadata().getOnlineConfiguration();
                     var eventConfiguration = event.getMetadata().getOnlineConfiguration();
                     var match = findMatchingLink(event.getZoneId(), categoryConfiguration, eventConfiguration);
                     if(match.isPresent()) {
-                        var checkInStatus = checkInManager.performCheckinForOnlineEvent(ticket, event, info.getTicketCategory());
+                        var checkInStatus = checkInManager.performCheckinForOnlineEvent(ticket, event, data.getTicketCategory());
                         log.info("check-in status {} for ticket {}", checkInStatus, ticketUUID);
                         if(checkInStatus == SUCCESS || (checkInStatus == ALREADY_CHECK_IN && ticket.isCheckedIn())) {
                             // invoke the extension for customizing the URL, if any
                             // we call the extension from here because it will have a smaller impact on the throughput compared to
                             // calling it from the checkInManager
-                            var customUrlOptional = extensionManager.handleOnlineCheckInLink(match.get(), ticket, event);
+                            var customUrlOptional = extensionManager.handleOnlineCheckInLink(match.get(), ticket, event, data.getTicketAdditionalInfo());
                             return customUrlOptional.or(() -> match);
                         }
                         log.info("denying check-in for ticket {} because check-in status was {}", ticketUUID, checkInStatus);

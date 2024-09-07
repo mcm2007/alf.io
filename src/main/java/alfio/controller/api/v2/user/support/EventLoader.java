@@ -17,7 +17,9 @@
 package alfio.controller.api.v2.user.support;
 
 import alfio.controller.api.v2.model.AnalyticsConfiguration;
+import alfio.controller.api.v2.model.EmbeddingConfiguration;
 import alfio.controller.api.v2.model.EventWithAdditionalInfo;
+import alfio.controller.api.v2.model.OfflinePaymentConfiguration;
 import alfio.controller.support.Formatters;
 import alfio.manager.i18n.MessageSourceManager;
 import alfio.manager.system.ConfigurationManager;
@@ -26,7 +28,6 @@ import alfio.model.modification.support.LocationDescriptor;
 import alfio.model.system.ConfigurationKeys;
 import alfio.repository.*;
 import alfio.repository.user.OrganizationRepository;
-import lombok.AllArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import javax.servlet.http.HttpSession;
@@ -35,7 +36,6 @@ import java.util.*;
 import static alfio.model.system.ConfigurationKeys.*;
 
 @Component
-@AllArgsConstructor
 public class EventLoader {
 
     private final EventRepository eventRepository;
@@ -48,6 +48,26 @@ public class EventLoader {
     private final PromoCodeDiscountRepository promoCodeRepository;
     private final SubscriptionRepository subscriptionRepository;
 
+    public EventLoader(EventRepository eventRepository,
+                       MessageSourceManager messageSourceManager,
+                       EventDescriptionRepository eventDescriptionRepository,
+                       OrganizationRepository organizationRepository,
+                       ConfigurationManager configurationManager,
+                       TicketCategoryRepository ticketCategoryRepository,
+                       TicketRepository ticketRepository,
+                       PromoCodeDiscountRepository promoCodeRepository,
+                       SubscriptionRepository subscriptionRepository) {
+        this.eventRepository = eventRepository;
+        this.messageSourceManager = messageSourceManager;
+        this.eventDescriptionRepository = eventDescriptionRepository;
+        this.organizationRepository = organizationRepository;
+        this.configurationManager = configurationManager;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.ticketRepository = ticketRepository;
+        this.promoCodeRepository = promoCodeRepository;
+        this.subscriptionRepository = subscriptionRepository;
+    }
+
     public Optional<EventWithAdditionalInfo> loadEventInfo(String eventName, HttpSession session) {
         return eventRepository.findOptionalByShortName(eventName).filter(e -> e.getStatus() != Event.Status.DISABLED)//
             .map(event -> {
@@ -56,7 +76,7 @@ public class EventLoader {
                 var messageSource = messageSourceAndOverride.getLeft();
                 var i18nOverride = messageSourceAndOverride.getRight();
 
-                var descriptions = Formatters.applyCommonMark(eventDescriptionRepository.findDescriptionByEventIdAsMap(event.getId()));
+                var descriptions = Formatters.applyCommonMark(eventDescriptionRepository.findDescriptionByEventIdAsMap(event.getId()), messageSource);
 
                 var organization = organizationRepository.getContactById(event.getOrganizationId());
 
@@ -108,11 +128,14 @@ public class EventLoader {
 
                 var hasLinkedSubscription = subscriptionRepository.hasLinkedSubscription(event.getId());
 
+                var offlinePaymentConfiguration = new OfflinePaymentConfiguration(configurationsValues.get(SHOW_ONLY_BASIC_INSTRUCTIONS).getValueAsBooleanOrDefault());
+
                 return new EventWithAdditionalInfo(event, locationDescriptor.getMapUrl(), organization, descriptions,
                     bankAccount, bankAccountOwner,
                     formattedDates.beginDate, formattedDates.beginTime,
                     formattedDates.endDate, formattedDates.endTime,
-                    invoicingConf, captchaConf, assignmentConf, promoConf, analyticsConf,
+                    invoicingConf, captchaConf, assignmentConf, promoConf, analyticsConf, offlinePaymentConfiguration,
+                    new EmbeddingConfiguration(configurationsValues.get(EMBED_POST_MESSAGE_ORIGIN).getValueOrNull()),
                     MessageSourceManager.convertPlaceholdersForEachLanguage(i18nOverride), availableTicketsCount, customCss, hasLinkedSubscription);
             });
     }

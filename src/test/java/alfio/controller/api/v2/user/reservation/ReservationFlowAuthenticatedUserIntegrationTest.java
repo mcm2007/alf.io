@@ -47,6 +47,8 @@ import alfio.repository.audit.ScanAuditRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.repository.user.UserRepository;
+import alfio.test.util.AlfioIntegrationTest;
+import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.BeforeEach;
@@ -68,11 +70,10 @@ import static alfio.test.util.IntegrationTestUtil.AVAILABLE_SEATS;
 import static alfio.test.util.IntegrationTestUtil.initEvent;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class, ControllerConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class ReservationFlowAuthenticatedUserIntegrationTest extends BaseReservationFlowTest {
+class ReservationFlowAuthenticatedUserIntegrationTest extends BaseReservationFlowTest {
 
     private final OrganizationRepository organizationRepository;
     private final UserManager userManager;
@@ -116,7 +117,11 @@ public class ReservationFlowAuthenticatedUserIntegrationTest extends BaseReserva
                                                            PollRepository pollRepository,
                                                            NotificationManager notificationManager,
                                                            UserRepository userRepository,
-                                                           UserApiV2Controller publicUserApiController) {
+                                                           UserApiV2Controller publicUserApiController,
+                                                           OrganizationDeleter organizationDeleter,
+                                                           PromoCodeDiscountRepository promoCodeDiscountRepository,
+                                                           PromoCodeRequestManager promoCodeRequestManager,
+                                                           ExportManager exportManager) {
         super(configurationRepository,
             eventManager,
             eventRepository,
@@ -148,7 +153,11 @@ public class ReservationFlowAuthenticatedUserIntegrationTest extends BaseReserva
             pollRepository,
             clockProvider,
             notificationManager,
-            userRepository);
+            userRepository,
+            organizationDeleter,
+            promoCodeDiscountRepository,
+            promoCodeRequestManager,
+            exportManager);
         this.organizationRepository = organizationRepository;
         this.userManager = userManager;
         this.publicUserApiController = publicUserApiController;
@@ -168,7 +177,7 @@ public class ReservationFlowAuthenticatedUserIntegrationTest extends BaseReserva
         Pair<Event, String> eventAndUser = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository);
         publicUserName = UUID.randomUUID().toString();
         var userIdContainer = userRepository.create(publicUserName, UUID.randomUUID().toString(), "First", "Last", "email@example.org", true, User.Type.PUBLIC, null, "");
-        return new ReservationFlowContext(eventAndUser.getLeft(), eventAndUser.getRight() + "_owner", null, null, publicUserName, userIdContainer.getKey());
+        return new ReservationFlowContext(eventAndUser.getLeft(), eventAndUser.getRight() + "_owner", null, null, publicUserName, userIdContainer.getKey(), true, false);
     }
 
     @BeforeEach
@@ -190,5 +199,8 @@ public class ReservationFlowAuthenticatedUserIntegrationTest extends BaseReserva
         assertNotNull(reservationsResponse.getBody());
         assertFalse(reservationsResponse.getBody().isEmpty());
         assertEquals(1, reservationsResponse.getBody().size());
+
+        var event = reservationFlowContext.event;
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), reservationFlowContext.userId, jdbcTemplate);
     }
 }

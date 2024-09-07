@@ -16,6 +16,7 @@
  */
 package alfio.controller.api.v2.user.reservation;
 
+import alfio.config.authentication.support.APITokenAuthentication;
 import alfio.controller.IndexController;
 import alfio.controller.api.admin.AdditionalServiceApiController;
 import alfio.controller.api.admin.CheckInApiController;
@@ -27,6 +28,7 @@ import alfio.controller.api.v2.TranslationsApiController;
 import alfio.controller.api.v2.model.BasicEventInfo;
 import alfio.controller.api.v2.model.EventCode;
 import alfio.controller.api.v2.model.Language;
+import alfio.controller.api.v2.model.ReservationInfo;
 import alfio.controller.api.v2.user.EventApiV2Controller;
 import alfio.controller.api.v2.user.ReservationApiV2Controller;
 import alfio.controller.api.v2.user.TicketApiV2Controller;
@@ -36,6 +38,7 @@ import alfio.extension.Extension;
 import alfio.extension.ExtensionService;
 import alfio.manager.*;
 import alfio.manager.support.CheckInStatus;
+import alfio.manager.support.IncompatibleStateException;
 import alfio.manager.support.TicketAndCheckInResult;
 import alfio.manager.support.extension.ExtensionEvent;
 import alfio.model.*;
@@ -62,41 +65,50 @@ import com.google.zxing.client.j2se.BufferedImageLuminanceSource;
 import com.google.zxing.common.HybridBinarizer;
 import com.google.zxing.qrcode.QRCodeReader;
 import com.opencsv.CSVReader;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.io.IOUtils;
+import org.junit.jupiter.api.Assertions;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.web.context.request.ServletWebRequest;
 
 import javax.imageio.ImageIO;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.StringReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.Principal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+import static alfio.config.authentication.support.AuthenticationConstants.SYSTEM_API_CLIENT;
 import static alfio.manager.support.extension.ExtensionEvent.*;
+import static alfio.model.system.ConfigurationKeys.TRANSLATION_OVERRIDE;
 import static java.util.Objects.requireNonNull;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 
-@RequiredArgsConstructor
-@Log4j2
+
 public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
+
+    private static final Logger log = LoggerFactory.getLogger(BaseReservationFlowTest.class);
 
     protected final ConfigurationRepository configurationRepository;
     protected final EventManager eventManager;
@@ -130,23 +142,101 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
     protected final ClockProvider clockProvider;
     protected final NotificationManager notificationManager;
     protected final UserRepository userRepository;
+    protected final OrganizationDeleter organizationDeleter;
+    protected final PromoCodeDiscountRepository promoCodeDiscountRepository;
+    protected final PromoCodeRequestManager promoCodeRequestManager;
+    protected final ExportManager exportManager;
 
     private Integer additionalServiceId;
 
-    private static final String PROMO_CODE = "MYPROMOCODE";
+    static final String PROMO_CODE = "MYPROMOCODE";
     private static final String HIDDEN_CODE = "HIDDENNN";
     static final String URL_CODE_HIDDEN = "CODE_CODE_CODE";
     private int hiddenCategoryId = Integer.MIN_VALUE;
+
+    protected BaseReservationFlowTest(ConfigurationRepository configurationRepository,
+                                      EventManager eventManager,
+                                      EventRepository eventRepository,
+                                      EventStatisticsManager eventStatisticsManager,
+                                      TicketCategoryRepository ticketCategoryRepository,
+                                      TicketReservationRepository ticketReservationRepository,
+                                      EventApiController eventApiController,
+                                      TicketRepository ticketRepository,
+                                      TicketFieldRepository ticketFieldRepository,
+                                      AdditionalServiceApiController additionalServiceApiController,
+                                      SpecialPriceTokenGenerator specialPriceTokenGenerator,
+                                      SpecialPriceRepository specialPriceRepository,
+                                      CheckInApiController checkInApiController,
+                                      AttendeeApiController attendeeApiController,
+                                      UsersApiController usersApiController,
+                                      ScanAuditRepository scanAuditRepository,
+                                      AuditingRepository auditingRepository,
+                                      AdminReservationManager adminReservationManager,
+                                      TicketReservationManager ticketReservationManager,
+                                      InfoApiController infoApiController,
+                                      TranslationsApiController translationsApiController,
+                                      EventApiV2Controller eventApiV2Controller,
+                                      ReservationApiV2Controller reservationApiV2Controller,
+                                      TicketApiV2Controller ticketApiV2Controller,
+                                      IndexController indexController,
+                                      NamedParameterJdbcTemplate jdbcTemplate,
+                                      ExtensionLogRepository extensionLogRepository,
+                                      ExtensionService extensionService,
+                                      PollRepository pollRepository,
+                                      ClockProvider clockProvider,
+                                      NotificationManager notificationManager,
+                                      UserRepository userRepository,
+                                      OrganizationDeleter organizationDeleter,
+                                      PromoCodeDiscountRepository promoCodeDiscountRepository,
+                                      PromoCodeRequestManager promoCodeRequestManager,
+                                      ExportManager exportManager) {
+        this.configurationRepository = configurationRepository;
+        this.eventManager = eventManager;
+        this.eventRepository = eventRepository;
+        this.eventStatisticsManager = eventStatisticsManager;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.ticketReservationRepository = ticketReservationRepository;
+        this.eventApiController = eventApiController;
+        this.ticketRepository = ticketRepository;
+        this.ticketFieldRepository = ticketFieldRepository;
+        this.additionalServiceApiController = additionalServiceApiController;
+        this.specialPriceTokenGenerator = specialPriceTokenGenerator;
+        this.specialPriceRepository = specialPriceRepository;
+        this.checkInApiController = checkInApiController;
+        this.attendeeApiController = attendeeApiController;
+        this.usersApiController = usersApiController;
+        this.scanAuditRepository = scanAuditRepository;
+        this.auditingRepository = auditingRepository;
+        this.adminReservationManager = adminReservationManager;
+        this.ticketReservationManager = ticketReservationManager;
+        this.infoApiController = infoApiController;
+        this.translationsApiController = translationsApiController;
+        this.eventApiV2Controller = eventApiV2Controller;
+        this.reservationApiV2Controller = reservationApiV2Controller;
+        this.ticketApiV2Controller = ticketApiV2Controller;
+        this.indexController = indexController;
+        this.jdbcTemplate = jdbcTemplate;
+        this.extensionLogRepository = extensionLogRepository;
+        this.extensionService = extensionService;
+        this.pollRepository = pollRepository;
+        this.clockProvider = clockProvider;
+        this.notificationManager = notificationManager;
+        this.userRepository = userRepository;
+        this.organizationDeleter = organizationDeleter;
+        this.promoCodeDiscountRepository = promoCodeDiscountRepository;
+        this.promoCodeRequestManager = promoCodeRequestManager;
+        this.exportManager = exportManager;
+    }
 
     private void ensureConfiguration(ReservationFlowContext context) {
 
         IntegrationTestUtil.ensureMinimalConfiguration(configurationRepository);
         //promo code at event level
-        eventManager.addPromoCode(PROMO_CODE, context.event.getId(), null, ZonedDateTime.now(clockProvider.getClock()).minusDays(2), context.event.getEnd().plusDays(2), 10, PromoCodeDiscount.DiscountType.PERCENTAGE, null, 3, "description", "test@test.ch", PromoCodeDiscount.CodeType.DISCOUNT, null);
+        eventManager.addPromoCode(PROMO_CODE, context.event.getId(), null, ZonedDateTime.now(clockProvider.getClock()).minusDays(2), context.event.getEnd().plusDays(2), 10, PromoCodeDiscount.DiscountType.PERCENTAGE, null, 3, "description", "test@test.ch", PromoCodeDiscount.CodeType.DISCOUNT, null, null);
 
-        hiddenCategoryId = ticketCategoryRepository.findAllTicketCategories(context.event.getId()).stream().filter(TicketCategory::isAccessRestricted).collect(Collectors.toList()).get(0).getId();
+        hiddenCategoryId = ticketCategoryRepository.findAllTicketCategories(context.event.getId()).stream().filter(TicketCategory::isAccessRestricted).toList().get(0).getId();
 
-        eventManager.addPromoCode(HIDDEN_CODE, context.event.getId(), null, ZonedDateTime.now(clockProvider.getClock()).minusDays(2), context.event.getEnd().plusDays(2), 0, PromoCodeDiscount.DiscountType.NONE, null, null, "hidden", "test@test.ch", PromoCodeDiscount.CodeType.ACCESS, hiddenCategoryId);
+        eventManager.addPromoCode(HIDDEN_CODE, context.event.getId(), null, ZonedDateTime.now(clockProvider.getClock()).minusDays(2), context.event.getEnd().plusDays(2), 0, PromoCodeDiscount.DiscountType.NONE, null, null, "hidden", "test@test.ch", PromoCodeDiscount.CodeType.ACCESS, hiddenCategoryId, null);
 
 
         // add additional fields before and after, with one mandatory
@@ -195,14 +285,13 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         specialPriceTokenGenerator.generatePendingCodes();
     }
 
+    protected Stream<String> getExtensionEventsToRegister() {
+        return allEvents();
+    }
+
     protected void testBasicFlow(Supplier<ReservationFlowContext> contextSupplier) throws Exception {
         // as soon as the test starts, insert the extension in the database (prepare the environment)
-        try (var extensionInputStream = requireNonNull(getClass().getResourceAsStream("/extension.js"))) {
-            List<String> extensionStream = IOUtils.readLines(new InputStreamReader(extensionInputStream, StandardCharsets.UTF_8));
-            String concatenation = String.join("\n", extensionStream).replace("EVENTS", Arrays.stream(ExtensionEvent.values()).map(ee -> "'"+ee.name()+"'").collect(Collectors.joining(",")));
-            extensionService.createOrUpdate(null, null, new Extension("-", "syncName", concatenation.replace("placeHolder", "false"), true));
-            extensionService.createOrUpdate(null, null, new Extension("-", "asyncName", concatenation.replace("placeHolder", "true"), true));
-        }
+        insertExtension(extensionService, "/extension.js", getExtensionEventsToRegister());
         List<BasicEventInfo> body = eventApiV2Controller.listEvents(SearchOptions.empty()).getBody();
         assertNotNull(body);
         assertTrue(body.isEmpty());
@@ -211,6 +300,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
 
         var context = contextSupplier.get();
         ensureConfiguration(context);
+        Assertions.assertEquals(1, eventManager.getEventsCount());
 
         // check if EVENT_CREATED was logged
         List<ExtensionLog> extLogs = extensionLogRepository.getPage(null, null, null, 100, 0);
@@ -254,7 +344,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
 
         //EL -> greece for vat
         assertEquals("Greece", translationsApiController.getCountriesForVat("en").stream().filter(c->"EL".equals(c.getIsoCode())).findFirst().get().getName());
-        assertEquals(28, translationsApiController.getEuCountriesForVat("en").size()); //
+        assertEquals(27, translationsApiController.getEuCountriesForVat("en").size()); //
         //
 
 
@@ -304,7 +394,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         assertEquals(context.event.getFileBlobId(), selectedEvent.getFileBlobId());
         assertTrue(selectedEvent.getI18nOverride().isEmpty());
 
-        configurationRepository.insert("TRANSLATION_OVERRIDE", Json.toJson(Map.of("en", Map.of("show-context.event.tickets.left", "{0} left!"))), "");
+        configurationRepository.insert(TRANSLATION_OVERRIDE.name(), Json.toJson(Map.of("en", Map.of("show-context.event.tickets.left", "{0} left!"))), "");
         configurationRepository.insertEventLevel(context.event.getOrganizationId(), context.event.getId(),"TRANSLATION_OVERRIDE", Json.toJson(Map.of("en", Map.of("common.vat", "context.event.vat"))), "");
         eventRes = eventApiV2Controller.getEvent(context.event.getShortName(), new MockHttpSession());
         selectedEvent = eventRes.getBody();
@@ -423,15 +513,31 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
 
         // dynamic promo codes can be applied only automatically
         {
-            eventManager.addPromoCode("DYNAMIC_CODE", context.event.getId(), null, ZonedDateTime.now(clockProvider.getClock()).minusDays(2), context.event.getEnd().plusDays(2), 10, PromoCodeDiscount.DiscountType.PERCENTAGE, null, 3, "description", "test@test.ch", PromoCodeDiscount.CodeType.DYNAMIC, null);
+            eventManager.addPromoCode("DYNAMIC_CODE", context.event.getId(), null, ZonedDateTime.now(clockProvider.getClock()).minusDays(2), context.event.getEnd().plusDays(2), 10, PromoCodeDiscount.DiscountType.PERCENTAGE, null, 3, "description", "test@test.ch", PromoCodeDiscount.CodeType.DYNAMIC, null, null);
             assertEquals(HttpStatus.UNPROCESSABLE_ENTITY, eventApiV2Controller.validateCode(context.event.getShortName(), "DYNAMIC_CODE").getStatusCode());
 
             // try to enter it anyway
             var form = new ReservationForm();
             var ticketReservation = new TicketReservationModification();
             form.setPromoCode("DYNAMIC_CODE");
-            ticketReservation.setAmount(1);
-            ticketReservation.setTicketCategoryId(eventApiV2Controller.getTicketCategories(context.event.getShortName(), null).getBody().getTicketCategories().get(0).getId());
+            ticketReservation.setQuantity(1);
+            ticketReservation.setTicketCategoryId(retrieveCategories(context).get(0).getId());
+            form.setReservation(Collections.singletonList(ticketReservation));
+            var res = eventApiV2Controller.reserveTickets(context.event.getShortName(), "en", form, new BeanPropertyBindingResult(form, "reservation"), new ServletWebRequest(new MockHttpServletRequest(), new MockHttpServletResponse()), null);
+            assertEquals(HttpStatus.UNPROCESSABLE_ENTITY, res.getStatusCode());
+        }
+
+        // promo code currency code must match with event's in order to be redeemed
+        {
+            eventManager.addPromoCode("TEST_TEST_TEST_TEST", null, context.event.getOrganizationId(), ZonedDateTime.now(clockProvider.getClock()).minusDays(2), context.event.getEnd().plusDays(2), 10, PromoCodeDiscount.DiscountType.FIXED_AMOUNT, null, 3, "description", "test@test.ch", PromoCodeDiscount.CodeType.DISCOUNT, null, "JPY");
+            assertEquals(HttpStatus.UNPROCESSABLE_ENTITY, eventApiV2Controller.validateCode(context.event.getShortName(), "TEST_TEST_TEST_TEST").getStatusCode());
+
+            // try to enter it anyway
+            var form = new ReservationForm();
+            var ticketReservation = new TicketReservationModification();
+            form.setPromoCode("TEST_TEST_TEST_TEST");
+            ticketReservation.setQuantity(1);
+            ticketReservation.setTicketCategoryId(retrieveCategories(context).get(0).getId());
             form.setReservation(Collections.singletonList(ticketReservation));
             var res = eventApiV2Controller.reserveTickets(context.event.getShortName(), "en", form, new BeanPropertyBindingResult(form, "reservation"), new ServletWebRequest(new MockHttpServletRequest(), new MockHttpServletResponse()), null);
             assertEquals(HttpStatus.UNPROCESSABLE_ENTITY, res.getStatusCode());
@@ -464,7 +570,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             var form = new ReservationForm();
             var ticketReservation = new TicketReservationModification();
             form.setPromoCode(HIDDEN_CODE);
-            ticketReservation.setAmount(1);
+            ticketReservation.setQuantity(1);
             ticketReservation.setTicketCategoryId(hiddenCat.getId());
             form.setReservation(Collections.singletonList(ticketReservation));
             var res = eventApiV2Controller.reserveTickets(context.event.getShortName(), "en", form, new BeanPropertyBindingResult(form, "reservation"), new ServletWebRequest(new MockHttpServletRequest(), new MockHttpServletResponse()), context.getPublicUser());
@@ -474,7 +580,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             assertEquals(HttpStatus.OK, reservationInfo.getStatusCode());
             assertNotNull(reservationInfo.getBody());
             assertEquals("1.00", reservationInfo.getBody().getOrderSummary().getTotalPrice());
-            assertEquals("hidden", reservationInfo.getBody().getOrderSummary().getSummary().get(0).getName());
+            assertEquals("hidden", reservationInfo.getBody().getOrderSummary().getSummary().get(0).name());
 
             var activePaymentMethods = reservationInfo.getBody().getActivePaymentMethods();
             assertFalse(activePaymentMethods.isEmpty());
@@ -496,6 +602,8 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             reservationApiV2Controller.cancelPendingReservation(res.getBody().getValue());
             extLogs = extensionLogRepository.getPage(null, null, null, 100, 0);
             assertEventLogged(extLogs, RESERVATION_CANCELLED, 2);
+
+            assertEquals(0, jdbcTemplate.queryForObject("select count(*) from ticket where status = 'FREE' and final_price_cts > 0", Map.of(), Integer.class));
 
             // this is run by a job, but given the fact that it's in another separate transaction, it cannot work in this test (WaitingQueueSubscriptionProcessor.handleWaitingTickets)
             assertEquals(1, ticketReservationManager.revertTicketsToFreeIfAccessRestricted(context.event.getId()));
@@ -598,8 +706,8 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         {
             var form = new ReservationForm();
             var ticketReservation = new TicketReservationModification();
-            ticketReservation.setAmount(1);
-            ticketReservation.setTicketCategoryId(eventApiV2Controller.getTicketCategories(context.event.getShortName(), null).getBody().getTicketCategories().get(0).getId());
+            ticketReservation.setQuantity(1);
+            ticketReservation.setTicketCategoryId(retrieveCategories(context).get(0).getId());
             form.setReservation(Collections.singletonList(ticketReservation));
             var res = eventApiV2Controller.reserveTickets(context.event.getShortName(), "en", form, new BeanPropertyBindingResult(form, "reservation"), new ServletWebRequest(new MockHttpServletRequest(), new MockHttpServletResponse()), context.getPublicUser());
             assertEquals(HttpStatus.OK, res.getStatusCode());
@@ -623,12 +731,12 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             var categories = eventApiV2Controller.getTicketCategories(context.event.getShortName(), HIDDEN_CODE).getBody().getTicketCategories();
 
             var c1 = new TicketReservationModification();
-            c1.setAmount(1);
+            c1.setQuantity(1);
             int firstCategoryId = categories.get(0).getId();
             c1.setTicketCategoryId(firstCategoryId);
 
             var c2 = new TicketReservationModification();
-            c2.setAmount(1);
+            c2.setQuantity(1);
             c2.setTicketCategoryId(categories.get(1).getId());
 
             form.setReservation(List.of(c1, c2));
@@ -654,8 +762,8 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         {
             var form = new ReservationForm();
             var ticketReservation = new TicketReservationModification();
-            ticketReservation.setAmount(2);
-            ticketReservation.setTicketCategoryId(eventApiV2Controller.getTicketCategories(context.event.getShortName(), null).getBody().getTicketCategories().get(0).getId());
+            ticketReservation.setQuantity(2);
+            ticketReservation.setTicketCategoryId(retrieveCategories(context).get(0).getId());
             form.setReservation(Collections.singletonList(ticketReservation));
 
             var additionalService = new AdditionalServiceReservationModification();
@@ -676,13 +784,13 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             assertNotNull(resInfoRes.getBody());
             var ticketsByCat = resInfoRes.getBody().getTicketsByCategory();
             assertEquals(1, ticketsByCat.size());
-            assertEquals(2, ticketsByCat.get(0).getTickets().size());
+            assertEquals(2, ticketsByCat.get(0).tickets().size());
 
-            var ticket1 = ticketsByCat.get(0).getTickets().get(0);
+            var ticket1 = ticketsByCat.get(0).tickets().get(0);
             assertEquals(1, ticket1.getTicketFieldConfigurationBeforeStandard().size()); // 1
             assertEquals(2, ticket1.getTicketFieldConfigurationAfterStandard().size()); // 1 + 1 additional service related field (appear only on first ticket)
 
-            var ticket2 = ticketsByCat.get(0).getTickets().get(1);
+            var ticket2 = ticketsByCat.get(0).tickets().get(1);
             assertEquals(1, ticket2.getTicketFieldConfigurationBeforeStandard().size()); // 1
             assertEquals(1, ticket2.getTicketFieldConfigurationAfterStandard().size()); // 1
 
@@ -736,13 +844,16 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         }
 
 
-        //buy one ticket, without discount
+        //buy one ticket
         {
             var form = new ReservationForm();
             var ticketReservation = new TicketReservationModification();
-            ticketReservation.setAmount(1);
-            ticketReservation.setTicketCategoryId(eventApiV2Controller.getTicketCategories(context.event.getShortName(), null).getBody().getTicketCategories().get(0).getId());
+            ticketReservation.setQuantity(1);
+            ticketReservation.setTicketCategoryId(retrieveCategories(context).get(0).getId());
             form.setReservation(Collections.singletonList(ticketReservation));
+            if (context.applyDiscount) {
+                form.setPromoCode(PROMO_CODE);
+            }
             var res = eventApiV2Controller.reserveTickets(context.event.getShortName(), "en", form, new BeanPropertyBindingResult(form, "reservation"), new ServletWebRequest(new MockHttpServletRequest(), new MockHttpServletResponse()), context.getPublicUser());
             assertEquals(HttpStatus.OK, res.getStatusCode());
             var resBody = res.getBody();
@@ -760,13 +871,13 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             assertNotNull(reservation);
             assertEquals(reservationId, reservation.getId());
             assertEquals(1, reservation.getTicketsByCategory().size());
-            assertEquals(1, reservation.getTicketsByCategory().get(0).getTickets().size());
+            assertEquals(1, reservation.getTicketsByCategory().get(0).tickets().size());
 
-            var selectedTicket = reservation.getTicketsByCategory().get(0).getTickets().get(0);
-            assertEquals("field1", selectedTicket.getTicketFieldConfigurationBeforeStandard().get(0).getName());
-            assertTrue(selectedTicket.getTicketFieldConfigurationBeforeStandard().get(0).isRequired());
-            assertEquals("field2", selectedTicket.getTicketFieldConfigurationAfterStandard().get(0).getName());
-            assertFalse(selectedTicket.getTicketFieldConfigurationAfterStandard().get(0).isRequired());
+            var selectedTicket = reservation.getTicketsByCategory().get(0).tickets().get(0);
+            assertEquals("field1", selectedTicket.getTicketFieldConfigurationBeforeStandard().get(0).name());
+            assertTrue(selectedTicket.getTicketFieldConfigurationBeforeStandard().get(0).required());
+            assertEquals("field2", selectedTicket.getTicketFieldConfigurationAfterStandard().get(0).name());
+            assertFalse(selectedTicket.getTicketFieldConfigurationAfterStandard().get(0).required());
 
             var contactForm = new ContactAndTicketsForm();
             var validationErrorsRes = reservationApiV2Controller.validateToOverview(reservationId, "en", false, contactForm, new BeanPropertyBindingResult(contactForm, "paymentForm"), context.getPublicAuthentication());
@@ -783,11 +894,13 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             contactForm.setFirstName("full");
             contactForm.setLastName("name");
 
+            customizeContactFormForSuccessfulReservation(contactForm);
+
             var ticketForm = new UpdateTicketOwnerForm();
             ticketForm.setFirstName("ticketfull");
             ticketForm.setLastName("ticketname");
             ticketForm.setEmail("tickettest@test.com");
-            contactForm.setTickets(Collections.singletonMap(reservation.getTicketsByCategory().get(0).getTickets().get(0).getUuid(), ticketForm));
+            contactForm.setTickets(Collections.singletonMap(reservation.getTicketsByCategory().get(0).tickets().get(0).getUuid(), ticketForm));
 
             var overviewResFailed = reservationApiV2Controller.validateToOverview(reservationId, "en", false, contactForm, new BeanPropertyBindingResult(contactForm, "paymentForm"), context.getPublicAuthentication());
             assertEquals(HttpStatus.UNPROCESSABLE_ENTITY, overviewResFailed.getStatusCode());
@@ -824,72 +937,19 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
                 assertTrue(owner.isEmpty());
             }
 
-            var paymentForm = new PaymentForm();
-            var handleResError = reservationApiV2Controller.confirmOverview(reservationId, "en", paymentForm, new BeanPropertyBindingResult(paymentForm, "paymentForm"),
-                new MockHttpServletRequest(), context.getPublicUser());
-            assertEquals(HttpStatus.UNPROCESSABLE_ENTITY, handleResError.getStatusCode());
+            int promoCodeId = promoCodeDiscountRepository.findPromoCodeInEventOrOrganization(context.event.getId(), PROMO_CODE).orElseThrow().getId();
 
+            // initialize and confirm payment
+            performAndValidatePayment(context, reservationId, promoCodeId, this::cleanupExtensionLog);
 
-            paymentForm.setPrivacyPolicyAccepted(true);
-            paymentForm.setTermAndConditionsAccepted(true);
-            paymentForm.setPaymentProxy(PaymentProxy.OFFLINE);
-            paymentForm.setSelectedPaymentMethod(PaymentMethod.BANK_TRANSFER);
-
-            // bank transfer does not have a transaction, it's created on confirmOverview call
-            var tStatus = reservationApiV2Controller.getTransactionStatus(reservationId, "BANK_TRANSFER");
-            assertEquals(HttpStatus.NOT_FOUND, tStatus.getStatusCode());
-            //
-
-            var handleRes = reservationApiV2Controller.confirmOverview(reservationId, "en", paymentForm, new BeanPropertyBindingResult(paymentForm, "paymentForm"),
-                new MockHttpServletRequest(), context.getPublicUser());
-
-            assertEquals(HttpStatus.OK, handleRes.getStatusCode());
-
-            checkStatus(reservationId, HttpStatus.OK, true, TicketReservation.TicketReservationStatus.OFFLINE_PAYMENT, context);
-
-            tStatus = reservationApiV2Controller.getTransactionStatus(reservationId, "BANK_TRANSFER");
-            assertEquals(HttpStatus.OK, tStatus.getStatusCode());
-            assertNotNull(tStatus.getBody());
-            assertFalse(tStatus.getBody().isSuccess());
+            ensureReservationIsComplete(reservationId, context);
 
             reservation = reservationApiV2Controller.getReservationInfo(reservationId, context.getPublicUser()).getBody();
             assertNotNull(reservation);
             var orderSummary = reservation.getOrderSummary();
-            assertTrue(orderSummary.isNotYetPaid());
-            assertEquals("10.00", orderSummary.getTotalPrice());
-            assertEquals("0.10", orderSummary.getTotalVAT());
-            assertEquals("1.00", orderSummary.getVatPercentage());
-
-            //clear the extension_log table so that we can check the expectation
-            cleanupExtensionLog();
-
-            validatePayment(context.event.getShortName(), reservationId, context);
-
-            extLogs = extensionLogRepository.getPage(null, null, null, 100, 0);
-
-            boolean online = containsOnlineTickets(context, reservationId);
-            assertEventLogged(extLogs, RESERVATION_CONFIRMED, online ? 10 : 8);
-            assertEventLogged(extLogs, CONFIRMATION_MAIL_CUSTOM_TEXT, online ? 10 : 8);
-            assertEventLogged(extLogs, TICKET_ASSIGNED, online ? 10 : 8);
-            if(online) {
-                assertEventLogged(extLogs, CUSTOM_ONLINE_JOIN_URL, 10);
-            }
-            assertEventLogged(extLogs, TICKET_MAIL_CUSTOM_TEXT, online ? 10 : 8);
-
-
-
-            checkStatus(reservationId, HttpStatus.OK, true, TicketReservation.TicketReservationStatus.COMPLETE, context);
-
-            tStatus = reservationApiV2Controller.getTransactionStatus(reservationId, "BANK_TRANSFER");
-            assertEquals(HttpStatus.OK, tStatus.getStatusCode());
-            assertNotNull(tStatus.getBody());
-            assertTrue(tStatus.getBody().isSuccess());
-
-            reservation = reservationApiV2Controller.getReservationInfo(reservationId, context.getPublicUser()).getBody();
-            assertNotNull(reservation);
-            orderSummary = reservation.getOrderSummary();
             assertFalse(orderSummary.isNotYetPaid());
 
+            checkDiscountUsage(reservationId, promoCodeId, context);
 
             var confRes = reservationApiV2Controller.reSendReservationConfirmationEmail(PurchaseContextType.event, context.event.getShortName(), reservationId, "en", context.getPublicUser());
             assertEquals(HttpStatus.OK, confRes.getStatusCode());
@@ -899,7 +959,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             // trigger email processing
             triggerEmailProcessingAndCheck(context, reservationId);
 
-            var ticket = reservation.getTicketsByCategory().stream().findFirst().orElseThrow().getTickets().get(0);
+            var ticket = reservation.getTicketsByCategory().stream().findFirst().orElseThrow().tickets().get(0);
             assertEquals("tickettest@test.com", ticket.getEmail());
             assertEquals("ticketfull", ticket.getFirstName());
             assertEquals("ticketname", ticket.getLastName());
@@ -946,7 +1006,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             assertEquals("full name", ticketFoundBody.getReservationFullName());
             reservation = reservationApiV2Controller.getReservationInfo(reservationId, context.getPublicUser()).getBody();
             assertNotNull(reservation);
-            ticket = reservation.getTicketsByCategory().stream().findFirst().orElseThrow().getTickets().get(0);
+            ticket = reservation.getTicketsByCategory().stream().findFirst().orElseThrow().tickets().get(0);
             assertEquals("testmctest@test.com", ticket.getEmail());
             assertEquals("Test", ticket.getFirstName());
             assertEquals("Testson", ticket.getLastName());
@@ -954,7 +1014,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
 
             var ticketPdfMockResp = new MockHttpServletResponse();
             ticketApiV2Controller.generateTicketPdf(context.event.getShortName(), ticket.getUuid(), ticketPdfMockResp);
-            assertEquals("application/pdf", ticketPdfMockResp.getContentType());
+            assertEquals(MediaType.APPLICATION_PDF_VALUE, ticketPdfMockResp.getContentType());
 
             var ticketQRCodeResp = new MockHttpServletResponse();
             ticketApiV2Controller.showQrCode(context.event.getShortName(), ticket.getUuid(), ticketQRCodeResp);
@@ -963,7 +1023,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
             var fullTicketInfo = ticketRepository.findByUUID(ticket.getUuid());
             var qrCodeReader = new QRCodeReader();
             var qrCodeRead = qrCodeReader.decode(new BinaryBitmap(new HybridBinarizer(new BufferedImageLuminanceSource(ImageIO.read(new ByteArrayInputStream(ticketQRCodeResp.getContentAsByteArray()))))), Map.of(DecodeHintType.PURE_BARCODE, Boolean.TRUE));
-            assertEquals(fullTicketInfo.ticketCode(context.event.getPrivateKey()), qrCodeRead.getText());
+            assertEquals(fullTicketInfo.ticketCode(context.event.getPrivateKey(), context.event.supportsQRCodeCaseInsensitive()), qrCodeRead.getText());
 
             //can only be done for free tickets
             var releaseTicketFailure = ticketApiV2Controller.releaseTicket(context.event.getShortName(), ticket.getUuid());
@@ -972,8 +1032,8 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
 
 
             //no invoice, but receipt
-            assertEquals(HttpStatus.NOT_FOUND, reservationApiV2Controller.getInvoice(context.event.getShortName(), reservationId, new MockHttpServletResponse(), context.getPublicAuthentication()).getStatusCode());
-            assertEquals(HttpStatus.OK, reservationApiV2Controller.getReceipt(context.event.getShortName(), reservationId, new MockHttpServletResponse(), context.getPublicAuthentication()).getStatusCode());
+            assertEquals(contactForm.isInvoiceRequested() ? HttpStatus.OK : HttpStatus.NOT_FOUND, reservationApiV2Controller.getInvoice(context.event.getShortName(), reservationId, new MockHttpServletResponse(), context.getPublicAuthentication()).getStatusCode());
+            assertEquals(contactForm.isInvoiceRequested() ? HttpStatus.NOT_FOUND : HttpStatus.OK, reservationApiV2Controller.getReceipt(context.event.getShortName(), reservationId, new MockHttpServletResponse(), context.getPublicAuthentication()).getStatusCode());
 
 
 
@@ -988,20 +1048,44 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
                 String ticketIdentifier = fullTicketInfo.getUuid();
                 String eventName = context.event.getShortName();
 
-                String ticketCode = fullTicketInfo.ticketCode(context.event.getPrivateKey());
+                // try to search ticket
+                var results = checkInApiController.searchAttendees(eventName, fullTicketInfo.getEmail(), 0, principal);
+                switch (context.event.getFormat()) {
+                    case IN_PERSON:
+                    case HYBRID:
+                        assertTrue(results.getStatusCode().is2xxSuccessful());
+                        assertNotNull(results.getBody());
+                        var searchResults = results.getBody();
+                        assertEquals(1, searchResults.getTotalPages());
+                        var attendees = searchResults.getAttendees();
+                        int count = searchResults.getTotalResults();
+                        assertFalse(searchResults.hasMorePages());
+                        assertFalse(attendees.isEmpty());
+                        assertEquals(count, attendees.size());
+                        assertTrue(attendees.stream().anyMatch(sr -> sr.getLastName().equals(fullTicketInfo.getLastName())));
+                        assertTrue(attendees.stream().allMatch(sr -> sr.getAdditionalInfo() != null));
+                        break;
+                    case ONLINE:
+                        assertTrue(results.getStatusCode().is2xxSuccessful());
+                        assertNotNull(results.getBody());
+                        assertEquals(0, results.getBody().getTotalResults());
+                        break;
+                }
+
+                String ticketCode = fullTicketInfo.ticketCode(context.event.getPrivateKey(), context.event.supportsQRCodeCaseInsensitive());
                 TicketAndCheckInResult ticketAndCheckInResult = checkInApiController.findTicketWithUUID(context.event.getId(), ticketIdentifier, ticketCode);
                 assertEquals(CheckInStatus.OK_READY_TO_BE_CHECKED_IN, ticketAndCheckInResult.getResult().getStatus());
                 CheckInApiController.TicketCode tc = new CheckInApiController.TicketCode();
                 tc.setCode(ticketCode);
-                assertEquals(CheckInStatus.SUCCESS, checkInApiController.checkIn(context.event.getId(), ticketIdentifier, tc, new TestingAuthenticationToken("ciccio", "ciccio")).getResult().getStatus());
+                assertEquals(CheckInStatus.SUCCESS, checkInApiController.checkIn(context.event.getId(), ticketIdentifier, tc, new TestingAuthenticationToken(context.userId + "_api", "")).getResult().getStatus());
                 List<ScanAudit> audits = scanAuditRepository.findAllForEvent(context.event.getId());
                 assertFalse(audits.isEmpty());
-                assertTrue(audits.stream().anyMatch(sa -> sa.getTicketUuid().equals(ticketIdentifier)));
+                assertTrue(audits.stream().anyMatch(sa -> sa.ticketUuid().equals(ticketIdentifier)));
 
                 extLogs = extensionLogRepository.getPage(null, null, null, 100, 0);
                 assertEventLogged(extLogs, TICKET_CHECKED_IN, 2);
 
-
+                validateCheckInData(context);
 
                 TicketAndCheckInResult ticketAndCheckInResultOk = checkInApiController.findTicketWithUUID(context.event.getId(), ticketIdentifier, ticketCode);
                 assertEquals(CheckInStatus.ALREADY_CHECK_IN, ticketAndCheckInResultOk.getResult().getStatus());
@@ -1014,6 +1098,30 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
                 assertEquals(20, eventWithAdditionalInfo3.getAvailableSeats());
                 assertEquals(1, eventWithAdditionalInfo3.getCheckedInTickets());
 
+                // at this point we should not be able to cancel the reservation anymore
+                var removeResult = adminReservationManager.removeReservation(
+                    PurchaseContextType.event,
+                    context.event.getShortName(),
+                    reservationId,
+                    true,
+                    true,
+                    true,
+                    context.userId
+                );
+                assertFalse(removeResult.isSuccess());
+
+                // trying to remove the ticket would result in a runtime exception
+                assertThrows(IncompatibleStateException.class, () -> adminReservationManager.removeTickets(
+                    context.event.getShortName(),
+                    reservationId,
+                    List.of(fullTicketInfo.getId()),
+                    List.of(),
+                    false,
+                    false,
+                    context.userId
+                ));
+
+                checkReservationExport(context);
 
                 //test revert check in
                 assertTrue(checkInApiController.revertCheckIn(context.event.getId(), ticketIdentifier, principal));
@@ -1027,9 +1135,9 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
                 Mockito.when(sponsorPrincipal.getName()).thenReturn(sponsorUser.getUsername());
 
                 // check failures
-                assertEquals(CheckInStatus.EVENT_NOT_FOUND, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest("not-existing-event", "not-existing-ticket", null, null), sponsorPrincipal).getBody().getResult().getStatus());
-                assertEquals(CheckInStatus.TICKET_NOT_FOUND, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, "not-existing-ticket", null, null), sponsorPrincipal).getBody().getResult().getStatus());
-                assertEquals(CheckInStatus.INVALID_TICKET_STATE, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticketIdentifier, null, null), sponsorPrincipal).getBody().getResult().getStatus());
+                assertEquals(CheckInStatus.EVENT_NOT_FOUND, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest("not-existing-event", "not-existing-ticket", null, null), sponsorPrincipal, null).getBody().getResult().getStatus());
+                assertEquals(CheckInStatus.TICKET_NOT_FOUND, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, "not-existing-ticket", null, null), sponsorPrincipal, null).getBody().getResult().getStatus());
+                assertEquals(CheckInStatus.INVALID_TICKET_STATE, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticketIdentifier, null, null), sponsorPrincipal, null).getBody().getResult().getStatus());
                 //
 
 
@@ -1053,113 +1161,275 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
                 assertEventLogged(extLogs, TICKET_CHECKED_IN, 2);
 
                 var offlineIdentifiers = checkInApiController.getOfflineIdentifiers(context.event.getShortName(), 0L, new MockHttpServletResponse(), principal);
-                assertFalse(offlineIdentifiers.isEmpty(), "Alf.io-PI integration must be enabled by default");
 
-                //disable Alf.io-PI
-                configurationRepository.insert(ConfigurationKeys.ALFIO_PI_INTEGRATION_ENABLED.name(), "false", null);
-                offlineIdentifiers = checkInApiController.getOfflineIdentifiers(context.event.getShortName(), 0L, new MockHttpServletResponse(), principal);
-                assertTrue(offlineIdentifiers.isEmpty());
+                if(context.checkInStationsEnabled) {
+                    assertFalse(offlineIdentifiers.isEmpty(), "Alf.io-PI integration must be enabled by default");
 
-                //re-enable Alf.io-PI
-                configurationRepository.insertEventLevel(context.event.getOrganizationId(), context.event.getId(), ConfigurationKeys.OFFLINE_CHECKIN_ENABLED.name(), "true", null);
-                configurationRepository.update(ConfigurationKeys.ALFIO_PI_INTEGRATION_ENABLED.name(), "true");
-                offlineIdentifiers = checkInApiController.getOfflineIdentifiers(context.event.getShortName(), 0L, new MockHttpServletResponse(), principal);
-                assertFalse(offlineIdentifiers.isEmpty());
-                // download encrypted ticket data
-                TicketWithCategory ticketwc = testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, false, context);
+                    //disable Alf.io-PI
+                    configurationRepository.insert(ConfigurationKeys.ALFIO_PI_INTEGRATION_ENABLED.name(), "false", null);
+                    offlineIdentifiers = checkInApiController.getOfflineIdentifiers(context.event.getShortName(), 0L, new MockHttpServletResponse(), principal);
+                    assertTrue(offlineIdentifiers.isEmpty());
 
-                // insert a poll and download again encrypted data. This time we expect a pin to be present because we haven't specified a tag
-                var rowCountAndKey = pollRepository.insert(Map.of("en", "test poll"), null, List.of(), 0, context.event.getId(), context.event.getOrganizationId());
-                testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, true, context);
+                    //re-enable Alf.io-PI
+                    configurationRepository.insertEventLevel(context.event.getOrganizationId(), context.event.getId(), ConfigurationKeys.OFFLINE_CHECKIN_ENABLED.name(), "true", null);
+                    configurationRepository.update(ConfigurationKeys.ALFIO_PI_INTEGRATION_ENABLED.name(), "true");
+                    offlineIdentifiers = checkInApiController.getOfflineIdentifiers(context.event.getShortName(), 0L, new MockHttpServletResponse(), principal);
+                    assertFalse(offlineIdentifiers.isEmpty());
+                    // download encrypted ticket data
+                    TicketWithCategory ticketwc = testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, false, context);
 
-                // we define a tag for the poll, this time we won't have a pin in the result
-                pollRepository.update(Map.of("en", "test poll"), null, List.of("blabla"), 0, rowCountAndKey.getKey(), context.event.getId());
-                testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, false, context);
+                    // insert a poll and download again encrypted data. This time we expect a pin to be present because we haven't specified a tag
+                    var rowCountAndKey = pollRepository.insert(Map.of("en", "test poll"), null, List.of(), 0, context.event.getId(), context.event.getOrganizationId());
+                    testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, true, context);
 
-                // now we add a matching tag to the ticket. As a result, the pin must be included in the result
-                ticketRepository.updateTicketTags(List.of(ticketwc.getId()), List.of("blabla"));
-                testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, true, context);
+                    // we define a tag for the poll, this time we won't have a pin in the result
+                    pollRepository.update(Map.of("en", "test poll"), null, List.of("blabla"), 0, rowCountAndKey.getKey(), context.event.getId());
+                    testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, false, context);
 
-                //
+                    // now we add a matching tag to the ticket. As a result, the pin must be included in the result
+                    ticketRepository.updateTicketTags(List.of(ticketwc.getId()), List.of("blabla"));
+                    testEncryptedCheckInPayload(principal, ticketAndcheckInResult, offlineIdentifiers, true, context);
 
-                // check register sponsor scan success flow
-                assertTrue(attendeeApiController.getScannedBadges(context.event.getShortName(), EventUtil.JSON_DATETIME_FORMATTER.format(LocalDateTime.of(1970, 1, 1, 0, 0)), sponsorPrincipal).getBody().isEmpty());
-                assertEquals(CheckInStatus.SUCCESS, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticketwc.getUuid(), null, null), sponsorPrincipal).getBody().getResult().getStatus());
-                assertEquals(1, attendeeApiController.getScannedBadges(context.event.getShortName(), EventUtil.JSON_DATETIME_FORMATTER.format(LocalDateTime.of(1970, 1, 1, 0, 0)), sponsorPrincipal).getBody().size());
+                    //
 
-                // check export
-                MockHttpServletResponse response = new MockHttpServletResponse();
-                eventApiController.downloadSponsorScanExport(context.event.getShortName(), "csv", response, principal);
-                response.getContentAsString();
-                CSVReader csvReader = new CSVReader(new StringReader(response.getContentAsString()));
-                List<String[]> csvSponsorScan = csvReader.readAll();
-                assertEquals(2, csvSponsorScan.size());
-                assertEquals("sponsor", csvSponsorScan.get(1)[0]);
-                assertEquals("Test Testson", csvSponsorScan.get(1)[3]);
-                assertEquals("testmctest@test.com", csvSponsorScan.get(1)[4]);
-                assertEquals("", csvSponsorScan.get(1)[8]);
-                assertEquals(SponsorScan.LeadStatus.WARM.name(), csvSponsorScan.get(1)[9]);
-                //
+                    // check register sponsor scan success flow
+                    assertTrue(attendeeApiController.getScannedBadges(context.event.getShortName(), EventUtil.JSON_DATETIME_FORMATTER.format(LocalDateTime.of(1970, 1, 1, 0, 0)), sponsorPrincipal).getBody().isEmpty());
+                    assertEquals(CheckInStatus.SUCCESS, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticketwc.getUuid(), null, null), sponsorPrincipal, null).getBody().getResult().getStatus());
+                    assertEquals(CheckInStatus.SUCCESS, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticketwc.getUuid(), null, null), sponsorPrincipal, null).getBody().getResult().getStatus());
+                    // scanned badges returns only unique values for a limited subset of columns
+                    assertEquals(1, attendeeApiController.getScannedBadges(context.event.getShortName(), EventUtil.JSON_DATETIME_FORMATTER.format(LocalDateTime.of(1970, 1, 1, 0, 0)), sponsorPrincipal).getBody().size());
 
-                // check update notes
-                assertEquals(CheckInStatus.SUCCESS, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticket.getUuid(), "this is a very good lead!", "HOT"), sponsorPrincipal).getBody().getResult().getStatus());
-                assertEquals(1, attendeeApiController.getScannedBadges(context.event.getShortName(), EventUtil.JSON_DATETIME_FORMATTER.format(LocalDateTime.of(1970, 1, 1, 0, 0)), sponsorPrincipal).getBody().size());
-                response = new MockHttpServletResponse();
-                eventApiController.downloadSponsorScanExport(context.event.getShortName(), "csv", response, principal);
-                response.getContentAsString();
-                csvReader = new CSVReader(new StringReader(response.getContentAsString()));
-                csvSponsorScan = csvReader.readAll();
-                assertEquals(2, csvSponsorScan.size());
-                assertEquals("sponsor", csvSponsorScan.get(1)[0]);
-                assertEquals("Test Testson", csvSponsorScan.get(1)[3]);
-                assertEquals("testmctest@test.com", csvSponsorScan.get(1)[4]);
-                assertEquals("this is a very good lead!", csvSponsorScan.get(1)[8]);
-                assertEquals(SponsorScan.LeadStatus.HOT.name(), csvSponsorScan.get(1)[9]);
+                    // check export
+                    MockHttpServletResponse response = new MockHttpServletResponse();
+                    eventApiController.downloadSponsorScanExport(context.event.getShortName(), "csv", response, principal);
+                    response.getContentAsString();
+                    CSVReader csvReader = new CSVReader(new StringReader(response.getContentAsString()));
+                    List<String[]> csvSponsorScan = csvReader.readAll();
+                    assertEquals(2, csvSponsorScan.size());
+                    assertEquals("sponsor", csvSponsorScan.get(1)[0]);
+                    assertEquals("Test Testson", csvSponsorScan.get(1)[3]);
+                    assertEquals("testmctest@test.com", csvSponsorScan.get(1)[4]);
+                    assertEquals("", csvSponsorScan.get(1)[8]);
+                    assertEquals(SponsorScan.LeadStatus.WARM.name(), csvSponsorScan.get(1)[9]);
+                    assertEquals(AttendeeManager.DEFAULT_OPERATOR_ID, csvSponsorScan.get(1)[10]);
+                    //
 
-                // #742 - test multiple check-ins
+                    // check update notes
+                    assertEquals(CheckInStatus.SUCCESS, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticket.getUuid(), "this is a very good lead!", "HOT"), sponsorPrincipal, null).getBody().getResult().getStatus());
+                    var scannedBadges = attendeeApiController.getScannedBadges(context.event.getShortName(), EventUtil.JSON_DATETIME_FORMATTER.format(LocalDateTime.of(1970, 1, 1, 0, 0)), sponsorPrincipal).getBody();
+                    assertEquals(1, requireNonNull(scannedBadges).size());
+                    assertEquals(CheckInStatus.SUCCESS, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticket.getUuid(), "this is a very good lead!", "HOT"), sponsorPrincipal, null).getBody().getResult().getStatus());
+                    scannedBadges = attendeeApiController.getScannedBadges(context.event.getShortName(), EventUtil.JSON_DATETIME_FORMATTER.format(LocalDateTime.of(1970, 1, 1, 0, 0)), sponsorPrincipal).getBody();
+                    assertEquals(1, requireNonNull(scannedBadges).size());
+                    response = new MockHttpServletResponse();
+                    eventApiController.downloadSponsorScanExport(context.event.getShortName(), "csv", response, principal);
+                    csvReader = new CSVReader(new StringReader(response.getContentAsString()));
+                    csvSponsorScan = csvReader.readAll();
+                    assertEquals(2, csvSponsorScan.size());
+                    assertEquals("sponsor", csvSponsorScan.get(1)[0]);
+                    assertEquals("Test Testson", csvSponsorScan.get(1)[3]);
+                    assertEquals("testmctest@test.com", csvSponsorScan.get(1)[4]);
+                    assertEquals("this is a very good lead!", csvSponsorScan.get(1)[8]);
+                    assertEquals(SponsorScan.LeadStatus.HOT.name(), csvSponsorScan.get(1)[9]);
+                    assertEquals(AttendeeManager.DEFAULT_OPERATOR_ID, csvSponsorScan.get(1)[10]);
 
-                // since on the badge we don't have the full ticket info, we will pass in "null" as scanned code
-                CheckInApiController.TicketCode badgeScan = new CheckInApiController.TicketCode();
-                badgeScan.setCode(null);
-                ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
-                // ONCE_PER_DAY is disabled by default, therefore we get an error
-                assertEquals(CheckInStatus.EMPTY_TICKET_CODE, ticketAndcheckInResult.getResult().getStatus());
-                // enable ONCE_PER_DAYFalse
-                TicketCategory category = ticketCategoryRepository.getById(ticketwc.getCategoryId());
-                ticketCategoryRepository.update(category.getId(), category.getName(), category.getInception(context.event.getZoneId()), category.getExpiration(context.event.getZoneId()), category.getMaxTickets(), category.isAccessRestricted(),
-                    MonetaryUtil.unitToCents(category.getPrice(), category.getCurrencyCode()), category.getCode(), category.getValidCheckInFrom(), category.getValidCheckInTo(), category.getTicketValidityStart(), category.getTicketValidityEnd(),
-                    TicketCategory.TicketCheckInStrategy.ONCE_PER_DAY,
-                    category.getTicketAccessType()
-                );
-                ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
-                // the event start date is in one week, so we expect an error here
-                assertEquals(CheckInStatus.INVALID_TICKET_CATEGORY_CHECK_IN_DATE, ticketAndcheckInResult.getResult().getStatus());
+                    // scan from a different operator
+                    response = new MockHttpServletResponse();
+                    assertEquals(CheckInStatus.SUCCESS, attendeeApiController.scanBadge(new AttendeeApiController.SponsorScanRequest(eventName, ticketwc.getUuid(), null, null), sponsorPrincipal, "OP2").getBody().getResult().getStatus());
+                    eventApiController.downloadSponsorScanExport(context.event.getShortName(), "csv", response, principal);
+                    csvReader = new CSVReader(new StringReader(response.getContentAsString()));
+                    csvSponsorScan = csvReader.readAll();
+                    assertEquals(3, csvSponsorScan.size());
+                    assertEquals("sponsor", csvSponsorScan.get(1)[0]);
+                    assertEquals("Test Testson", csvSponsorScan.get(1)[3]);
+                    assertEquals("testmctest@test.com", csvSponsorScan.get(1)[4]);
+                    assertEquals("this is a very good lead!", csvSponsorScan.get(1)[8]);
+                    assertEquals(SponsorScan.LeadStatus.HOT.name(), csvSponsorScan.get(1)[9]);
+                    assertEquals(AttendeeManager.DEFAULT_OPERATOR_ID, csvSponsorScan.get(1)[10]);
 
-                eventRepository.updateHeader(context.event.getId(), context.event.getDisplayName(), context.event.getWebsiteUrl(), context.event.getExternalUrl(), context.event.getTermsAndConditionsUrl(), context.event.getPrivacyPolicyUrl(), context.event.getImageUrl(),
-                    context.event.getFileBlobId(), context.event.getLocation(), context.event.getLatitude(), context.event.getLongitude(), context.event.now(clockProvider).minusSeconds(1), context.event.getEnd(), context.event.getTimeZone(),
-                    context.event.getOrganizationId(), context.event.getLocales(), context.event.getFormat());
+                    assertEquals("sponsor", csvSponsorScan.get(2)[0]);
+                    assertEquals("Test Testson", csvSponsorScan.get(2)[3]);
+                    assertEquals("testmctest@test.com", csvSponsorScan.get(2)[4]);
+                    assertEquals("", csvSponsorScan.get(2)[8]);
+                    assertEquals("OP2", csvSponsorScan.get(2)[10]);
 
-                ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
-                // we have already scanned the ticket today, so we expect to receive a warning
-                assertEquals(CheckInStatus.BADGE_SCAN_ALREADY_DONE, ticketAndcheckInResult.getResult().getStatus());
-                assertEquals(1, (int) auditingRepository.countAuditsOfTypeForReservation(reservationId, Audit.EventType.BADGE_SCAN));
+                    // #742 - test multiple check-ins
 
-                // move the scans to yesterday
-                // we expect 3 rows because:
-                // 1 check-in
-                // 1 revert
-                // 1 badge scan
-                assertEquals(3, jdbcTemplate.update("update auditing set event_time = event_time - interval '1 day' where reservation_id = :reservationId and event_type in ('BADGE_SCAN', 'CHECK_IN')", Map.of("reservationId", reservationId)));
+                    // since on the badge we don't have the full ticket info, we will pass in "null" as scanned code
+                    CheckInApiController.TicketCode badgeScan = new CheckInApiController.TicketCode();
+                    badgeScan.setCode(null);
+                    ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
+                    // ONCE_PER_DAY is disabled by default, therefore we get an error
+                    assertEquals(CheckInStatus.EMPTY_TICKET_CODE, ticketAndcheckInResult.getResult().getStatus());
+                    // enable ONCE_PER_DAYFalse
+                    TicketCategory category = ticketCategoryRepository.getById(ticketwc.getCategoryId());
+                    ticketCategoryRepository.update(category.getId(), category.getName(), category.getInception(context.event.getZoneId()), category.getExpiration(context.event.getZoneId()), category.getMaxTickets(), category.isAccessRestricted(),
+                        MonetaryUtil.unitToCents(category.getPrice(), category.getCurrencyCode()), category.getCode(), category.getValidCheckInFrom(), category.getValidCheckInTo(), category.getTicketValidityStart(), category.getTicketValidityEnd(),
+                        TicketCategory.TicketCheckInStrategy.ONCE_PER_DAY,
+                        category.getTicketAccessType()
+                    );
+                    ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
+                    // the event start date is in one week, so we expect an error here
+                    assertEquals(CheckInStatus.INVALID_TICKET_CATEGORY_CHECK_IN_DATE, ticketAndcheckInResult.getResult().getStatus());
 
-                ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
-                // we now expect to receive a successful message
-                assertEquals(CheckInStatus.BADGE_SCAN_SUCCESS, ticketAndcheckInResult.getResult().getStatus());
-                assertEquals(2, (int) auditingRepository.countAuditsOfTypeForReservation(reservationId, Audit.EventType.BADGE_SCAN));
+                    eventRepository.updateHeader(context.event.getId(), context.event.getDisplayName(), context.event.getWebsiteUrl(), context.event.getExternalUrl(), context.event.getTermsAndConditionsUrl(), context.event.getPrivacyPolicyUrl(), context.event.getImageUrl(),
+                        context.event.getFileBlobId(), context.event.getLocation(), context.event.getLatitude(), context.event.getLongitude(), context.event.now(clockProvider).minusSeconds(1), context.event.getEnd(), context.event.getTimeZone(),
+                        context.event.getOrganizationId(), context.event.getLocales(), context.event.getFormat());
+
+                    ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
+                    // we have already scanned the ticket today, so we expect to receive a warning
+                    assertEquals(CheckInStatus.BADGE_SCAN_ALREADY_DONE, ticketAndcheckInResult.getResult().getStatus());
+                    assertEquals(1, (int) auditingRepository.countAuditsOfTypeForReservation(reservationId, Audit.EventType.BADGE_SCAN));
+
+                    // move the scans to yesterday
+                    // we expect 3 rows because:
+                    // 1 check-in
+                    // 1 revert
+                    // 1 badge scan
+                    assertEquals(3, jdbcTemplate.update("update auditing set event_time = event_time - interval '1 day' where reservation_id = :reservationId and event_type in ('BADGE_SCAN', 'CHECK_IN')", Map.of("reservationId", reservationId)));
+
+                    ticketAndcheckInResult = checkInApiController.checkIn(context.event.getId(), ticketIdentifier, badgeScan, new TestingAuthenticationToken("ciccio", "ciccio"));
+                    // we now expect to receive a successful message
+                    assertEquals(CheckInStatus.BADGE_SCAN_SUCCESS, ticketAndcheckInResult.getResult().getStatus());
+                    assertEquals(2, (int) auditingRepository.countAuditsOfTypeForReservation(reservationId, Audit.EventType.BADGE_SCAN));
+                } else {
+                    assertTrue(offlineIdentifiers.isEmpty(), "Alf.io-PI integration must be disabled");
+                }
             }
             performAdditionalTests(context);
             eventManager.deleteEvent(context.event.getId(), context.userId);
+            assertTrue(organizationDeleter.deleteOrganization(context.event.getOrganizationId(), new APITokenAuthentication("TEST", "", List.of(new SimpleGrantedAuthority("ROLE_" + SYSTEM_API_CLIENT)))));
         }
 
+    }
+
+    protected void customizeContactFormForSuccessfulReservation(ContactAndTicketsForm contactForm) {
+
+    }
+
+    protected void ensureReservationIsComplete(String reservationId, ReservationFlowContext context) {
+        checkStatus(reservationId, HttpStatus.OK, true, TicketReservation.TicketReservationStatus.COMPLETE, context);
+    }
+
+    private void checkReservationExport(ReservationFlowContext context) {
+        Principal principal = mock(Principal.class);
+        Mockito.when(principal.getName()).thenReturn(context.userId);
+        // load all reservations
+        var now = LocalDate.now(clockProvider.getClock());
+        var reservationsByEvent = exportManager.reservationsForInterval(now.minusDays(1), now, principal);
+        assertEquals(1, reservationsByEvent.size());
+        assertEquals(1, reservationsByEvent.get(0).getReservations().size());
+        assertEquals(1, reservationsByEvent.get(0).getReservations().get(0).getTickets().size());
+
+        // ensure that the filtering works as expected
+        reservationsByEvent = exportManager.reservationsForInterval(now.plusDays(1), now.plusDays(2), principal);
+        assertEquals(0, reservationsByEvent.size());
+
+        // ensure that we get error if the interval is wrong
+        var wrongFrom = now.plusDays(1);
+        assertThrows(IllegalArgumentException.class, () -> exportManager.reservationsForInterval(wrongFrom, now, principal));
+    }
+
+    static void insertExtension(ExtensionService extensionService, String path, Stream<String> events) throws IOException {
+        insertExtension(extensionService, path, true, true, events);
+    }
+
+    static Stream<String> allEvents() {
+        return Arrays.stream(ExtensionEvent.values()).map(ee -> "'"+ee.name()+"'");
+    }
+
+    static void insertExtension(ExtensionService extensionService, String path, boolean async, boolean sync, Stream<String> events) throws IOException {
+        try (var extensionInputStream = requireNonNull(BaseReservationFlowTest.class.getResourceAsStream(path))) {
+            List<String> extensionStream = IOUtils.readLines(new InputStreamReader(extensionInputStream, StandardCharsets.UTF_8));
+            String concatenation = String.join("\n", extensionStream).replace("EVENTS", events.collect(Collectors.joining(",")));
+            if (sync) {
+                extensionService.createOrUpdate(null, null, new Extension("-", "syncName", concatenation.replace("placeHolder", "false"), true));
+            }
+            if (async) {
+                extensionService.createOrUpdate(null, null, new Extension("-", "asyncName", concatenation.replace("placeHolder", "true"), true));
+            }
+        }
+    }
+
+    protected void validateCheckInData(ReservationFlowContext context) {
+
+    }
+
+    protected void performAndValidatePayment(ReservationFlowContext context,
+                                             String reservationId,
+                                             int promoCodeId,
+                                             Runnable cleanupExtensionLog) {
+        ReservationInfo reservation;
+        var paymentForm = new PaymentForm();
+        var handleResError = reservationApiV2Controller.confirmOverview(reservationId, "en", paymentForm, new BeanPropertyBindingResult(paymentForm, "paymentForm"),
+            new MockHttpServletRequest(), context.getPublicUser());
+        assertEquals(HttpStatus.UNPROCESSABLE_ENTITY, handleResError.getStatusCode());
+
+
+        paymentForm.setPrivacyPolicyAccepted(true);
+        paymentForm.setTermAndConditionsAccepted(true);
+        paymentForm.setPaymentProxy(PaymentProxy.OFFLINE);
+        paymentForm.setSelectedPaymentMethod(PaymentMethod.BANK_TRANSFER);
+
+        // bank transfer does not have a transaction, it's created on confirmOverview call
+        var tStatus = reservationApiV2Controller.getTransactionStatus(reservationId, "BANK_TRANSFER");
+        assertEquals(HttpStatus.NOT_FOUND, tStatus.getStatusCode());
+        //
+        var promoCodeUsage = promoCodeRequestManager.retrieveDetailedUsage(promoCodeId, context.event.getId());
+        assertTrue(promoCodeUsage.isEmpty());
+
+        var handleRes = reservationApiV2Controller.confirmOverview(reservationId, "en", paymentForm, new BeanPropertyBindingResult(paymentForm, "paymentForm"),
+            new MockHttpServletRequest(), context.getPublicUser());
+
+        assertEquals(HttpStatus.OK, handleRes.getStatusCode());
+
+        checkStatus(reservationId, HttpStatus.OK, true, TicketReservation.TicketReservationStatus.OFFLINE_PAYMENT, context);
+
+        tStatus = reservationApiV2Controller.getTransactionStatus(reservationId, "BANK_TRANSFER");
+        assertEquals(HttpStatus.OK, tStatus.getStatusCode());
+        assertNotNull(tStatus.getBody());
+        assertFalse(tStatus.getBody().isSuccess());
+
+        reservation = reservationApiV2Controller.getReservationInfo(reservationId, context.getPublicUser()).getBody();
+        assertNotNull(reservation);
+        checkOrderSummary(reservation);
+        cleanupExtensionLog.run();
+        validatePayment(context.event.getShortName(), reservationId, context);
+
+        var extLogs = extensionLogRepository.getPage(null, null, null, 100, 0);
+
+        boolean online = containsOnlineTickets(context, reservationId);
+        assertEventLogged(extLogs, RESERVATION_CONFIRMED, online ? 12 : 10);
+        assertEventLogged(extLogs, CONFIRMATION_MAIL_CUSTOM_TEXT, online ? 12 : 10);
+        assertEventLogged(extLogs, TICKET_ASSIGNED, online ? 12 : 10);
+        if(online) {
+            assertEventLogged(extLogs, CUSTOM_ONLINE_JOIN_URL, 12);
+        }
+        assertEventLogged(extLogs, TICKET_ASSIGNED_GENERATE_METADATA, online ? 12 : 10);
+        assertEventLogged(extLogs, TICKET_MAIL_CUSTOM_TEXT, online ? 12 : 10);
+
+        tStatus = reservationApiV2Controller.getTransactionStatus(reservationId, "BANK_TRANSFER");
+        assertEquals(HttpStatus.OK, tStatus.getStatusCode());
+        assertNotNull(tStatus.getBody());
+        assertTrue(tStatus.getBody().isSuccess());
+    }
+
+    protected void checkDiscountUsage(String reservationId, int promoCodeId, ReservationFlowContext context) {
+        var promoCodeUsage = promoCodeRequestManager.retrieveDetailedUsage(promoCodeId, context.event.getId());
+        assertTrue(promoCodeUsage.isEmpty());
+    }
+
+    protected void checkOrderSummary(ReservationInfo reservation) {
+        var orderSummary = reservation.getOrderSummary();
+        assertTrue(orderSummary.isNotYetPaid());
+        assertEquals("10.00", orderSummary.getTotalPrice());
+        assertEquals("0.10", orderSummary.getTotalVAT());
+        assertEquals("1.00", orderSummary.getVatPercentage());
+    }
+
+    private List<alfio.controller.api.v2.model.TicketCategory> retrieveCategories(ReservationFlowContext context) {
+        var response = requireNonNull(eventApiV2Controller.getTicketCategories(context.event.getShortName(), null));
+        return requireNonNull(response.getBody()).getTicketCategories();
     }
 
     protected void performAdditionalTests(ReservationFlowContext reservationFlowContext) {}
@@ -1172,11 +1442,12 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         Map<String, String> payload = checkInApiController.getOfflineEncryptedInfo(context.event.getShortName(), Collections.emptyList(), offlineIdentifiers, principal);
         assertEquals(1, payload.size());
         TicketWithCategory ticketwc = ticketAndcheckInResult.getTicket();
-        String ticketKey = ticketwc.hmacTicketInfo(context.event.getPrivateKey());
+        String ticketKey = ticketwc.hmacTicketInfo(context.event.getPrivateKey(), true);
+        assertNotEquals(ticketKey, ticketwc.hmacTicketInfo(context.event.getPrivateKey(), false));
         String hashedTicketKey = DigestUtils.sha256Hex(ticketKey);
         String encJson = payload.get(hashedTicketKey);
         assertNotNull(encJson);
-        String ticketPayload = CheckInManager.decrypt(ticketwc.getUuid() + "/" + ticketKey, encJson);
+        String ticketPayload = CheckInManagerInvoker.decrypt(ticketwc.getUuid() + "/" + ticketKey, encJson);
         Map<String, String> jsonPayload = Json.fromJson(ticketPayload, new TypeReference<>() {
         });
         assertNotNull(jsonPayload);
@@ -1198,7 +1469,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
     protected void testAddSubscription(ReservationFlowContext context, int numberOfTickets) {
         var form = new ReservationForm();
         var ticketReservation = new TicketReservationModification();
-        ticketReservation.setAmount(numberOfTickets);
+        ticketReservation.setQuantity(numberOfTickets);
         var categoriesResponse = eventApiV2Controller.getTicketCategories(context.event.getShortName(), null);
         assertTrue(categoriesResponse.getStatusCode().is2xxSuccessful());
         assertNotNull(categoriesResponse.getBody());
@@ -1220,7 +1491,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         assertNotNull(reservation);
         assertEquals(reservationId, reservation.getId());
         assertEquals(1, reservation.getTicketsByCategory().size());
-        assertEquals(numberOfTickets, reservation.getTicketsByCategory().get(0).getTickets().size());
+        assertEquals(numberOfTickets, reservation.getTicketsByCategory().get(0).tickets().size());
 
         var contactForm = new ContactAndTicketsForm();
 
@@ -1231,7 +1502,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         contactForm.setFirstName("full");
         contactForm.setLastName("name");
 
-        var tickets = reservation.getTicketsByCategory().get(0).getTickets().stream()
+        var tickets = reservation.getTicketsByCategory().get(0).tickets().stream()
             .map(t -> {
                 var ticketForm = new UpdateTicketOwnerForm();
                 ticketForm.setFirstName("ticketfull");
@@ -1268,9 +1539,9 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         assertTrue(reservation.getOrderSummary().isFree());
 
         // assert that there is a row in the summary for the subscription
-        var summaryRowSubscription = reservation.getOrderSummary().getSummary().stream().filter(r -> r.getType() == SummaryRow.SummaryType.APPLIED_SUBSCRIPTION).findFirst();
+        var summaryRowSubscription = reservation.getOrderSummary().getSummary().stream().filter(r -> r.type() == SummaryRow.SummaryType.APPLIED_SUBSCRIPTION).findFirst();
         assertTrue(summaryRowSubscription.isPresent());
-        assertEquals(numberOfTickets, summaryRowSubscription.get().getAmount());
+        assertEquals(numberOfTickets, summaryRowSubscription.get().amount());
 
         // proceed with the confirmation
         var paymentForm = new PaymentForm();
@@ -1301,12 +1572,16 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         jdbcTemplate.update("delete from extension_log", Map.of());
     }
 
-    private void assertEventLogged(List<ExtensionLog> extLog, ExtensionEvent event, int logSize) {
+    protected void assertEventLogged(List<ExtensionLog> extLog, ExtensionEvent event, int logSize) {
         assertEquals(logSize, extLog.size()); // each event logs exactly two logs
         assertTrue(extLog.stream().anyMatch(l -> l.getDescription().equals(event.name())));
     }
 
-    private void checkStatus(String reservationId,
+    protected void assertEventLogged(List<ExtensionLog> extLog, ExtensionEvent event) {
+        assertTrue(extLog.stream().anyMatch(l -> l.getDescription().equals(event.name())), event.name() + " not found");
+    }
+
+    protected final void checkStatus(String reservationId,
                              HttpStatus expectedHttpStatus,
                              Boolean validated,
                              TicketReservation.TicketReservationStatus reservationStatus,
@@ -1323,7 +1598,7 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         }
     }
 
-    private void validatePayment(String eventName, String reservationIdentifier, ReservationFlowContext context) {
+    protected void validatePayment(String eventName, String reservationIdentifier, ReservationFlowContext context) {
         Principal principal = mock(Principal.class);
         Mockito.when(principal.getName()).thenReturn(context.userId);
         var reservation = ticketReservationRepository.findReservationById(reservationIdentifier);
@@ -1332,9 +1607,13 @@ public abstract class BaseReservationFlowTest extends BaseIntegrationTest {
         assertEquals(10, reservation.getVatCts());
         assertEquals(0, reservation.getDiscountCts());
         assertEquals(1, eventApiController.getPendingPayments(eventName).size());
-        assertEquals("OK", eventApiController.confirmPayment(eventName, reservationIdentifier, principal));
+        confirmPayment(eventName, reservationIdentifier, principal);
         assertEquals(0, eventApiController.getPendingPayments(eventName).size());
         assertEquals(1000, eventRepository.getGrossIncome(context.event.getId()));
+    }
+
+    private void confirmPayment(String eventName, String reservationIdentifier, Principal principal) {
+        assertEquals("OK", eventApiController.confirmPayment(eventName, reservationIdentifier, null, principal));
     }
 
     private void checkCalendar(String eventName) {

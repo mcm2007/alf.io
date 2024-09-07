@@ -27,10 +27,11 @@ import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.system.EventMigrationRepository;
 import alfio.util.ClockProvider;
 import alfio.util.MonetaryUtil;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.namedparam.EmptySqlParameterSource;
@@ -57,8 +58,9 @@ import static java.util.stream.Collectors.*;
 
 @Component
 @Transactional(readOnly = true)
-@Log4j2
 public class DataMigrator {
+
+    private static final Logger log = LoggerFactory.getLogger(DataMigrator.class);
 
     private static final Pattern VERSION_PATTERN = Pattern.compile("(\\d\\.)([0-9.]*)(-SNAPSHOT)?");
     private static final Map<String, String> PRICE_UPDATE_BY_KEY = new LinkedHashMap<>();
@@ -132,7 +134,7 @@ public class DataMigrator {
 
     private void fixVatStatus() {
         transactionTemplate.execute(ts -> {
-            int rows = jdbc.update("update tickets_reservation set vat_status = (select vat_status from event where id = event_id_fk) where vat_status is null", Map.of());
+            int rows = jdbc.update("update tickets_reservation set vat_status = e.vat_status from event e where tickets_reservation.vat_status is null and tickets_reservation.event_id_fk = e.id", Map.of());
             log.debug("update VAT/GST on {} reservations", rows);
             return null;
         });
@@ -266,7 +268,7 @@ public class DataMigrator {
 
     void fillReservationsLanguage() {
         transactionTemplate.execute(s -> {
-            jdbc.queryForList("select id from tickets_reservation where user_language is null", new EmptySqlParameterSource(), String.class)
+            jdbc.queryForList("select id from tickets_reservation where user_language is null", EmptySqlParameterSource.INSTANCE, String.class)
                     .forEach(id -> {
                         MapSqlParameterSource param = new MapSqlParameterSource("reservationId", id);
                         String language = optionally(() -> jdbc.queryForObject("select user_language from ticket where tickets_reservation_id = :reservationId limit 1", param, String.class)).orElse("en");
@@ -288,8 +290,14 @@ public class DataMigrator {
      * in order to ensure backward compatibility
      */
     private void fixAvailableSeats(Event event) {
-        int availableSeats = eventRepository.countExistingTickets(event.getId());
-        eventRepository.updatePrices(event.getCurrency(), availableSeats, event.isVatIncluded(), event.getVat(), event.getAllowedPaymentProxies().stream().map(PaymentProxy::name).collect(joining(",")), event.getId(), event.getVatStatus(), event.getSrcPriceCts());
+        try {
+            int availableSeats = eventRepository.countExistingTickets(event.getId());
+            var paymentProxies = event.getAllowedPaymentProxies().stream().map(PaymentProxy::name).collect(joining(","));
+            eventRepository.updatePrices(event.getCurrency(), availableSeats, event.isVatIncluded(),
+                event.getVat(), paymentProxies, event.getId(), event.getVatStatus(), event.getSrcPriceCts());
+        } catch (Exception ex) {
+            log.trace("got exception while fixing available seats", ex);
+        }
     }
 
     boolean needsFixing(EventMigration eventMigration) {
@@ -439,7 +447,7 @@ public class DataMigrator {
                     @Override
                     public Optional<PromoCodeDiscount> getDiscount() {
                         return Optional.ofNullable(ticket.get("discount_amount"))
-                            .map(amount -> new PromoCodeDiscount(0, "", eventId, null, null, null, (int) amount, PromoCodeDiscount.DiscountType.valueOf((String) ticket.get("discount_type")), "", null, null, null, PromoCodeDiscount.CodeType.DISCOUNT, null));
+                            .map(amount -> new PromoCodeDiscount(0, "", eventId, null, null, null, (int) amount, PromoCodeDiscount.DiscountType.valueOf((String) ticket.get("discount_type")), "", null, null, null, PromoCodeDiscount.CodeType.DISCOUNT, null, currencyCode));
                     }
                 });
             })

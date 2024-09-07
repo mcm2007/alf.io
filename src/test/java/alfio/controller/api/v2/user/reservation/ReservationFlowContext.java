@@ -22,6 +22,7 @@ import org.springframework.security.core.Authentication;
 
 import java.security.Principal;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 class ReservationFlowContext {
@@ -31,17 +32,24 @@ class ReservationFlowContext {
     final String subscriptionPin;
     final String publicUsername;
     final Integer publicUserId;
+    final boolean checkInStationsEnabled;
+    final boolean applyDiscount;
     private final Authentication authentication;
+    private final Map<String, String> additionalParams;
 
     ReservationFlowContext(Event event, String userId) {
-        this(event, userId, null, null, null, null);
+        this(event, userId, null, null, null, null, true, false, Map.of());
     }
 
     ReservationFlowContext(Event event, String userId, UUID subscriptionId, String subscriptionPin) {
-        this(event, userId, subscriptionId, subscriptionPin, null, null);
+        this(event, userId, subscriptionId, subscriptionPin, null, null, true, false, Map.of());
     }
 
-    ReservationFlowContext(Event event, String userId, UUID subscriptionId, String subscriptionPin, String publicUsername, Integer publicUserId) {
+    ReservationFlowContext(Event event, String userId, UUID subscriptionId, String subscriptionPin, String publicUsername, Integer publicUserId, boolean checkInStationsEnabled, boolean applyDiscount) {
+        this(event, userId, subscriptionId, subscriptionPin, publicUsername, publicUserId, checkInStationsEnabled, applyDiscount, Map.of());
+    }
+
+    ReservationFlowContext(Event event, String userId, UUID subscriptionId, String subscriptionPin, String publicUsername, Integer publicUserId, boolean checkInStationsEnabled, boolean applyDiscount, Map<String, String> additionalParams) {
         this.event = event;
         this.userId = userId;
         this.subscriptionId = subscriptionId;
@@ -53,6 +61,9 @@ class ReservationFlowContext {
         } else {
             this.authentication = null;
         }
+        this.checkInStationsEnabled = checkInStationsEnabled;
+        this.applyDiscount = applyDiscount;
+        this.additionalParams = additionalParams;
     }
 
     Principal getPublicUser() {
@@ -61,5 +72,9 @@ class ReservationFlowContext {
 
     Authentication getPublicAuthentication() {
         return authentication;
+    }
+
+    Map<String, String> getAdditionalParams() {
+        return additionalParams;
     }
 }

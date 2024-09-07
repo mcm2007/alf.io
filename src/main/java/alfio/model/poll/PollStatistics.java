@@ -17,18 +17,22 @@
 package alfio.model.poll;
 
 import alfio.util.MonetaryUtil;
-import lombok.AllArgsConstructor;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
 import java.util.stream.Collectors;
 
-@AllArgsConstructor
 public class PollStatistics {
     private final int totalVotes;
     private final int allowedParticipants;
     private final List<PollOptionStatistics> countByOption;
+
+    public PollStatistics(int totalVotes, int allowedParticipants, List<PollOptionStatistics> countByOption) {
+        this.totalVotes = totalVotes;
+        this.allowedParticipants = allowedParticipants;
+        this.countByOption = countByOption;
+    }
 
     public int getTotalVotes() {
         return totalVotes;
@@ -46,8 +50,8 @@ public class PollStatistics {
         BigDecimal totalVotes = new BigDecimal(this.totalVotes);
         return countByOption.stream()
             .map(o -> {
-                var percentage = getVotesPercentage(totalVotes, o.getVotes());
-                return new StatisticDetail(o.getVotes(), o.getOptionId(), percentage);
+                var percentage = getVotesPercentage(totalVotes, o.votes());
+                return new StatisticDetail(o.votes(), o.optionId(), percentage);
             })
             .collect(Collectors.toList());
     }

@@ -16,81 +16,111 @@
  */
 package alfio.config.authentication;
 
-import alfio.config.authentication.support.APIKeyAuthFilter;
-import alfio.config.authentication.support.APITokenAuthentication;
-import alfio.config.authentication.support.RequestTypeMatchers;
-import alfio.config.authentication.support.WrongAccountTypeException;
+import alfio.config.authentication.support.*;
+import alfio.model.system.ConfigurationKeys;
 import alfio.model.user.User;
+import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.AuthorityRepository;
 import alfio.repository.user.UserRepository;
 import alfio.util.ClockProvider;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
+import org.springframework.security.config.annotation.web.configurers.ExpressionUrlAuthorizationConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.web.SecurityFilterChain;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.ZonedDateTime;
-import java.util.stream.Collectors;
+import java.util.List;
 
-import static alfio.config.authentication.AuthenticationConstants.*;
+import static alfio.config.authentication.support.AuthenticationConstants.*;
 
 @Configuration(proxyBeanMethods = false)
 @Order(0)
-public class APITokenAuthWebSecurity extends WebSecurityConfigurerAdapter {
+public class APITokenAuthWebSecurity {
 
+    public static final String API_KEY = "Api key ";
     private final UserRepository userRepository;
     private final AuthorityRepository authorityRepository;
+    private final ConfigurationRepository configurationRepository;
 
     public APITokenAuthWebSecurity(UserRepository userRepository,
-                                   AuthorityRepository authorityRepository) {
+                                   AuthorityRepository authorityRepository,
+                                   ConfigurationRepository configurationRepository) {
         this.userRepository = userRepository;
         this.authorityRepository = authorityRepository;
+        this.configurationRepository = configurationRepository;
     }
 
     //https://stackoverflow.com/a/48448901
-    @Override
-    protected void configure(HttpSecurity http) throws Exception {
+    @Bean
+    public SecurityFilterChain configure(HttpSecurity http) throws Exception {
 
         APIKeyAuthFilter filter = new APIKeyAuthFilter();
         filter.setAuthenticationManager(authentication -> {
             //
             String apiKey = (String) authentication.getPrincipal();
+
+            // check if API Key is system
+            var systemApiKeyOptional = configurationRepository.findOptionalByKey(ConfigurationKeys.SYSTEM_API_KEY.name());
+
+            if (systemApiKeyOptional.isPresent() && apiKeyMatches(apiKey, systemApiKeyOptional.get())) {
+                return new APITokenAuthentication(
+                    authentication.getPrincipal(),
+                    authentication.getCredentials(),
+                    List.of(new SimpleGrantedAuthority("ROLE_" + SYSTEM_API_CLIENT)));
+            }
+
             //check if user type ->
-            User user = userRepository.findByUsername(apiKey).orElseThrow(() -> new BadCredentialsException("Api key " + apiKey + " don't exists"));
+            User user = userRepository.findByUsername(apiKey).orElseThrow(() -> new BadCredentialsException(API_KEY + apiKey + " don't exists"));
             if (!user.isEnabled()) {
-                throw new DisabledException("Api key " + apiKey + " is disabled");
+                throw new DisabledException(API_KEY + apiKey + " is disabled");
             }
             if (User.Type.API_KEY != user.getType()) {
                 throw new WrongAccountTypeException("Wrong account type for username " + apiKey);
             }
             if (!user.isCurrentlyValid(ZonedDateTime.now(ClockProvider.clock()))) {
-                throw new DisabledException("Api key " + apiKey + " is expired");
+                throw new DisabledException(API_KEY + apiKey + " is expired");
             }
 
             return new APITokenAuthentication(
                 authentication.getPrincipal(),
                 authentication.getCredentials(),
-                authorityRepository.findRoles(apiKey).stream().map(SimpleGrantedAuthority::new).collect(Collectors.toList()));
+                authorityRepository.findRoles(apiKey).stream().map(SimpleGrantedAuthority::new).toList());
         });
 
 
-        http.requestMatcher(RequestTypeMatchers::isTokenAuthentication)
+        return http.requestMatcher(RequestTypeMatchers::isTokenAuthentication)
             .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
             .and().csrf().disable()
-            .authorizeRequests()
+            .authorizeRequests(APITokenAuthWebSecurity::configureMatchers)
+            .addFilter(filter)
+            .build();
+    }
+
+    private static void configureMatchers(ExpressionUrlAuthorizationConfigurer<HttpSecurity>.ExpressionInterceptUrlRegistry auth) {
+        auth.antMatchers(ADMIN_PUBLIC_API + "/system/**").hasRole(SYSTEM_API_CLIENT)
             .antMatchers(ADMIN_PUBLIC_API + "/**").hasRole(API_CLIENT)
+            .antMatchers(ADMIN_API + "/check-in/event/*/attendees").hasRole(SUPERVISOR)
+            .antMatchers(ADMIN_API + "/check-in/*/label-layout").hasAnyRole(OPERATOR, SUPERVISOR, SPONSOR)
             .antMatchers(ADMIN_API + "/check-in/**").hasAnyRole(OPERATOR, SUPERVISOR)
-            .antMatchers(HttpMethod.GET, ADMIN_API + "/events").hasAnyRole(OPERATOR, SUPERVISOR, AuthenticationConstants.SPONSOR)
+            .antMatchers(HttpMethod.GET, ADMIN_API + "/events").hasAnyRole(OPERATOR, SUPERVISOR, SPONSOR)
             .antMatchers(HttpMethod.GET, ADMIN_API + "/user-type", ADMIN_API + "/user/details").hasAnyRole(OPERATOR, SUPERVISOR, AuthenticationConstants.SPONSOR)
             .antMatchers(ADMIN_API + "/**").denyAll()
-            .antMatchers(HttpMethod.POST, "/api/attendees/sponsor-scan").hasRole(AuthenticationConstants.SPONSOR)
+            .antMatchers(HttpMethod.POST, "/api/attendees/sponsor-scan").hasRole(SPONSOR)
             .antMatchers(HttpMethod.GET, "/api/attendees/*/ticket/*").hasAnyRole(OPERATOR, SUPERVISOR, API_CLIENT)
-            .antMatchers("/**").authenticated()
-            .and().addFilter(filter);
+            .antMatchers("/**").authenticated();
+    }
+
+    private static boolean apiKeyMatches(String input, alfio.model.system.Configuration systemApiKeyConfiguration) {
+        return MessageDigest.isEqual(input.getBytes(StandardCharsets.UTF_8),
+            systemApiKeyConfiguration.getValue().getBytes(StandardCharsets.UTF_8));
     }
 }

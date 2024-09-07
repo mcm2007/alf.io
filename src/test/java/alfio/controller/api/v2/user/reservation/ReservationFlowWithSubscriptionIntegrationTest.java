@@ -34,25 +34,23 @@ import alfio.controller.api.v2.user.TicketApiV2Controller;
 import alfio.extension.ExtensionService;
 import alfio.manager.*;
 import alfio.manager.user.UserManager;
-import alfio.model.AllocationStatus;
 import alfio.model.Event;
-import alfio.model.PriceContainer;
 import alfio.model.TicketCategory;
 import alfio.model.metadata.AlfioMetadata;
 import alfio.model.modification.DateTimeModification;
-import alfio.model.modification.SubscriptionDescriptorModification;
+import alfio.model.modification.EventModification;
 import alfio.model.modification.TicketCategoryModification;
 import alfio.model.modification.UploadBase64FileModification;
 import alfio.model.subscription.MaxEntriesOverageDetails;
 import alfio.model.subscription.SubscriptionDescriptor;
 import alfio.model.subscription.SubscriptionUsageExceeded;
 import alfio.model.subscription.SubscriptionUsageExceededForEvent;
-import alfio.model.transaction.PaymentProxy;
 import alfio.repository.*;
 import alfio.repository.audit.ScanAuditRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.repository.user.UserRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
 import alfio.util.Json;
@@ -67,31 +65,32 @@ import org.springframework.jdbc.UncategorizedSQLException;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
-import java.time.ZonedDateTime;
+import java.time.ZoneId;
 import java.util.*;
 
-import static alfio.test.util.IntegrationTestUtil.AVAILABLE_SEATS;
-import static alfio.test.util.IntegrationTestUtil.initEvent;
-import static java.util.Objects.requireNonNullElse;
+import static alfio.test.util.IntegrationTestUtil.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class, ControllerConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservationFlowTest {
+class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservationFlowTest {
 
     private final OrganizationRepository organizationRepository;
     private final UserManager userManager;
     private final SubscriptionManager subscriptionManager;
     private final SubscriptionRepository subscriptionRepository;
     private final FileUploadManager fileUploadManager;
+    private final PlatformTransactionManager platformTransactionManager;
 
     private static final Map<String, String> DESCRIPTION = Collections.singletonMap("en", "desc");
 
@@ -134,7 +133,12 @@ public class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservat
                                                           SubscriptionManager subscriptionManager,
                                                           SubscriptionRepository subscriptionRepository,
                                                           FileUploadManager fileUploadManager,
-                                                          UserRepository userRepository) {
+                                                          UserRepository userRepository,
+                                                          PlatformTransactionManager platformTransactionManager,
+                                                          OrganizationDeleter organizationDeleter,
+                                                          PromoCodeDiscountRepository promoCodeDiscountRepository,
+                                                          PromoCodeRequestManager promoCodeRequestManager,
+                                                          ExportManager exportManager) {
         super(configurationRepository,
             eventManager,
             eventRepository,
@@ -166,12 +170,17 @@ public class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservat
             pollRepository,
             clockProvider,
             notificationManager,
-            userRepository);
+            userRepository,
+            organizationDeleter,
+            promoCodeDiscountRepository,
+            promoCodeRequestManager,
+            exportManager);
         this.organizationRepository = organizationRepository;
         this.userManager = userManager;
         this.subscriptionManager = subscriptionManager;
         this.subscriptionRepository = subscriptionRepository;
         this.fileUploadManager = fileUploadManager;
+        this.platformTransactionManager = platformTransactionManager;
     }
 
     @BeforeEach
@@ -197,42 +206,14 @@ public class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservat
         // create subscription descriptor
 
         var event = eventAndUser.getLeft();
-        var zoneId = clockProvider.getClock().getZone();
-        var subscriptionModification = new SubscriptionDescriptorModification(null,
-            Map.of("en", "title"),
-            Map.of("en", "description"),
-            42,
-            ZonedDateTime.now(ClockProvider.clock()),
-            null,
-            BigDecimal.TEN,
-            new BigDecimal("7.7"),
-            PriceContainer.VatStatus.INCLUDED,
-            "CHF",
-            false,
-            event.getOrganizationId(),
-            2,
-            SubscriptionDescriptor.SubscriptionValidityType.CUSTOM,
-            null,
-            null,
-            ZonedDateTime.now(ClockProvider.clock()).minusDays(1),
-            ZonedDateTime.now(ClockProvider.clock()).plusDays(42),
-            SubscriptionDescriptor.SubscriptionUsageType.ONCE_PER_EVENT,
-            "https://example.org",
-            null,
-            fileBlobId,
-            List.of(PaymentProxy.STRIPE),
-            zoneId);
-
-        var descriptorId = subscriptionManager.createSubscriptionDescriptor(subscriptionModification).orElseThrow();
-        var subscriptionId = subscriptionRepository.selectFreeSubscription(descriptorId).orElseThrow();
-        var subscriptionReservationId = UUID.randomUUID().toString();
-        ticketReservationRepository.createNewReservation(subscriptionReservationId, ZonedDateTime.now(clockProvider.getClock()), Date.from(Instant.now(clockProvider.getClock())), null, "en", null, new BigDecimal("7.7"), true, "CHF", event.getOrganizationId(), null);
-        subscriptionRepository.bindSubscriptionToReservation(subscriptionReservationId, AllocationStatus.PENDING, subscriptionId);
-        subscriptionRepository.confirmSubscription(subscriptionReservationId, AllocationStatus.ACQUIRED,
-            "Test", "Mc Test", "tickettest@test.com", requireNonNullElse(subscriptionModification.getMaxEntries(), -1),
-            null, null, ZonedDateTime.now(clockProvider.getClock()), zoneId.toString());
-        var subscription = subscriptionRepository.findSubscriptionById(subscriptionId);
-        this.context = new ReservationFlowContext(event, eventAndUser.getRight() + "_owner", subscriptionId, subscription.getPin());
+        int maxEntries = 2;
+        var descriptorId = createSubscriptionDescriptor(event.getOrganizationId(), fileUploadManager, subscriptionManager, maxEntries);
+        var descriptor = subscriptionRepository.findOne(descriptorId).orElseThrow();
+        var subscriptionIdAndPin = confirmAndLinkSubscription(descriptor, event.getOrganizationId(), subscriptionRepository, ticketReservationRepository, maxEntries);
+        this.subscriptionRepository.linkSubscriptionAndEvent(descriptorId, event.getId(), 0, event.getOrganizationId());
+        var linkedSubscriptions = eventManager.getLinkedSubscriptionIds(event.getId(), event.getOrganizationId());
+        assertEquals(List.of(descriptorId), linkedSubscriptions);
+        this.context = new ReservationFlowContext(event, eventAndUser.getRight() + "_owner", subscriptionIdAndPin.getLeft(), subscriptionIdAndPin.getRight());
     }
 
     @AfterEach
@@ -245,20 +226,22 @@ public class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservat
     }
 
     @Test
-    public void inPersonEventWithSubscriptionUsingID() {
+    void inPersonEventWithSubscriptionUsingID() {
         var modifiedContext = new ReservationFlowContext(context.event, context.userId, context.subscriptionId, null);
         super.testAddSubscription(modifiedContext, 1);
         var eventInfo = eventStatisticsManager.getEventWithAdditionalInfo(context.event.getShortName(), context.userId);
         assertEquals(BigDecimal.ZERO, eventInfo.getGrossIncome());
+        assertErrorWhenTransferToAnotherOrg();
     }
 
     @Test
-    public void inPersonEventWithSubscriptionUsingPin() {
+    void inPersonEventWithSubscriptionUsingPin() {
         super.testAddSubscription(context, 1);
+        assertErrorWhenTransferToAnotherOrg();
     }
 
     @Test
-    public void triggerMaxSubscriptionPerEvent() {
+    void triggerMaxSubscriptionPerEvent() {
         super.testAddSubscription(context, 1);
         var params = Map.of("subscriptionId", context.subscriptionId, "eventId", context.event.getId());
         assertEquals(1, jdbcTemplate.queryForObject("select count(*) from tickets_reservation where subscription_id_fk = :subscriptionId and event_id_fk = :eventId", params, Integer.class));
@@ -274,7 +257,7 @@ public class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservat
     }
 
     @Test
-    public void triggerMaxUsage() {
+    void triggerMaxUsage() {
         assertEquals(2, subscriptionRepository.findSubscriptionById(context.subscriptionId).getMaxEntries());
         jdbcTemplate.update("update subscription set max_entries = 1 where id = :id::uuid", Map.of("id", context.subscriptionId));
         super.testAddSubscription(context, 1);
@@ -298,5 +281,101 @@ public class ReservationFlowWithSubscriptionIntegrationTest extends BaseReservat
         assertEquals(SubscriptionDescriptor.SubscriptionUsageType.ONCE_PER_EVENT, subscriptionById.getUsageType());
         jdbcTemplate.update("update subscription_descriptor set usage_type = 'UNLIMITED' where id = :id", Map.of("id", subscriptionById.getId()));
         super.testAddSubscription(context, 2);
+        assertErrorWhenTransferToAnotherOrg();
+    }
+
+    @Test
+    void unlinkSubscriptionAndTransferResources() {
+        int eventId = context.event.getId();
+        int orgId = context.event.getOrganizationId();
+        subscriptionRepository.removeAllSubscriptionsForEvent(eventId, orgId);
+        BaseIntegrationTest.testTransferEventToAnotherOrg(eventId, orgId, context.userId, jdbcTemplate);
+        var descriptor = subscriptionRepository.findDescriptorBySubscriptionId(context.subscriptionId);
+        BaseIntegrationTest.testTransferSubscriptionDescriptorToAnotherOrg(descriptor.getId(), orgId, context.userId, jdbcTemplate);
+    }
+
+    private void assertErrorWhenTransferToAnotherOrg() {
+        var definition = new DefaultTransactionDefinition(TransactionDefinition.PROPAGATION_NESTED);
+        var template = new TransactionTemplate(platformTransactionManager, definition);
+        template.execute(status -> {
+            var savepoint = status.createSavepoint();
+            try {
+                var event = context.event;
+                BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), context.userId, jdbcTemplate);
+            } catch (UncategorizedSQLException uex) {
+                var error = SqlUtils.findServerError(uex).orElseThrow();
+                assertEquals("CANNOT_TRANSFER_SUBSCRIPTION_LINK", error.getMessage());
+                status.rollbackToSavepoint(savepoint);
+            }
+            return null;
+        });
+        template.execute(status -> {
+            var savepoint = status.createSavepoint();
+            try {
+                var descriptor = subscriptionRepository.findDescriptorBySubscriptionId(context.subscriptionId);
+                BaseIntegrationTest.testTransferSubscriptionDescriptorToAnotherOrg(descriptor.getId(), descriptor.getOrganizationId(), context.userId, jdbcTemplate);
+            } catch (UncategorizedSQLException uex) {
+                var error = SqlUtils.findServerError(uex).orElseThrow();
+                assertEquals("CANNOT_TRANSFER_SUBSCRIPTION_LINK", error.getMessage());
+                status.rollbackToSavepoint(savepoint);
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void testUpdateEventHeaderError() {
+        List<TicketCategoryModification> categories = Collections.singletonList(
+            new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 10,
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                new DateTimeModification(LocalDate.now(clockProvider.getClock()), LocalTime.now(clockProvider.getClock())),
+                DESCRIPTION, BigDecimal.TEN, false, "", false, null, null, null, null, null, 0, null, null, AlfioMetadata.empty()));
+        Pair<Event, String> pair = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository);
+        Event event = pair.getLeft();
+        String username = pair.getRight();
+
+        Map<String, String> desc = new HashMap<>();
+        desc.put("en", "muh description new");
+        desc.put("it", "muh description new");
+        desc.put("de", "muh description new");
+
+        var descriptorId = createSubscriptionDescriptor(event.getOrganizationId(), fileUploadManager, subscriptionManager, 10);
+        this.subscriptionRepository.linkSubscriptionAndEvent(descriptorId, event.getId(), 0, event.getOrganizationId());
+        int newOrgId = BaseIntegrationTest.createNewOrg(username, jdbcTemplate);
+
+        EventModification em = new EventModification(event.getId(),
+            Event.EventFormat.IN_PERSON,
+            "http://example.com/new",
+            null,
+            "http://example.com/tc",
+            "http://example.com/pp",
+            "https://example.com/img.png",
+            null,
+            event.getShortName(),
+            "new display name",
+            newOrgId,
+            event.getLocation(),
+            "0.0",
+            "0.0",
+            ZoneId.systemDefault().getId(),
+            desc,
+            DateTimeModification.fromZonedDateTime(event.getBegin()),
+            DateTimeModification.fromZonedDateTime(event.getEnd().plusDays(42)),
+            event.getRegularPrice(),
+            event.getCurrency(),
+            eventRepository.countExistingTickets(event.getId()),
+            event.getVat(),
+            event.isVatIncluded(),
+            event.getAllowedPaymentProxies(),
+            Collections.emptyList(),
+            false,
+            null,
+            7,
+            null,
+            null,
+            AlfioMetadata.empty(),
+            List.of());
+
+        assertThrows(IllegalArgumentException.class, () -> eventManager.updateEventHeader(event, em, username));
     }
 }

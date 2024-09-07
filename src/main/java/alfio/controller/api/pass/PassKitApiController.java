@@ -19,9 +19,9 @@ package alfio.controller.api.pass;
 import alfio.manager.PassKitManager;
 import alfio.model.EventAndOrganizationId;
 import alfio.model.Ticket;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -34,11 +34,15 @@ import java.util.Optional;
  */
 @RestController
 @RequestMapping("/api/pass/event/{eventName}/v1")
-@Log4j2
-@RequiredArgsConstructor
 public class PassKitApiController {
 
+    private static final Logger log = LoggerFactory.getLogger(PassKitApiController.class);
+
     private final PassKitManager passKitManager;
+
+    public PassKitApiController(PassKitManager passKitManager) {
+        this.passKitManager = passKitManager;
+    }
 
 
     @GetMapping("/version/passes/{passTypeIdentifier}/{serialNumber}")
@@ -52,13 +56,36 @@ public class PassKitApiController {
             response.sendError(HttpServletResponse.SC_NOT_FOUND);
         } else {
             Pair<EventAndOrganizationId, Ticket> pair = validationResult.get();
-            try (var os = response.getOutputStream()) {
-                response.setContentType("application/vnd.apple.pkpass");
-                passKitManager.writePass(pair.getRight(), pair.getLeft(), os);
-            } catch (Exception e) {
-                log.warn("Error during pass generation", e);
-                response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+            writePassResponse(response, pair.getLeft(), pair.getRight(), false);
+        }
+    }
+
+    @GetMapping("/version/passes/{ticketUuid}")
+    public void downloadPassForTicket(@PathVariable("eventName") String eventName,
+                                      @PathVariable("ticketUuid") String ticketUuid,
+                                      HttpServletResponse response) throws IOException {
+        var ticketAndEventData = passKitManager.retrieveTicketDetails(eventName, ticketUuid);
+        if (ticketAndEventData.isPresent()) {
+            var pair = ticketAndEventData.get();
+            writePassResponse(response, pair.getKey(), pair.getValue(), true);
+        } else {
+            response.sendError(HttpServletResponse.SC_NOT_FOUND);
+        }
+    }
+
+    private void writePassResponse(HttpServletResponse response,
+                                   EventAndOrganizationId eventAndOrganizationId,
+                                   Ticket ticket,
+                                   boolean addFilename) throws IOException {
+        try (var os = response.getOutputStream()) {
+            response.setContentType("application/vnd.apple.pkpass");
+            if (addFilename) {
+                response.setHeader("Content-Disposition", "attachment; filename=Passbook-"+ticket.getUuid().substring(0, 8)+".pkpass");
             }
+            passKitManager.writePass(ticket, eventAndOrganizationId, os);
+        } catch (Exception e) {
+            log.warn("Error during pass generation", e);
+            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
         }
     }
 

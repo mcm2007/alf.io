@@ -16,15 +16,17 @@
  */
 package alfio.controller.api.v2.model;
 
+import alfio.controller.api.support.BookingInfoTicket;
 import alfio.model.BillingDetails;
 import alfio.model.OrderSummary;
+import alfio.model.ReservationMetadata;
 import alfio.model.SummaryRow.SummaryType;
 import alfio.model.TicketCategory;
 import alfio.model.TicketReservation.TicketReservationStatus;
+import alfio.model.api.v1.admin.subscription.SubscriptionConfiguration;
 import alfio.model.subscription.UsageDetails;
 import alfio.model.transaction.PaymentMethod;
 import alfio.model.transaction.PaymentProxy;
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 
 import java.util.List;
@@ -32,7 +34,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-@AllArgsConstructor
 @Getter
 public class ReservationInfo {
     private final String id;
@@ -77,128 +78,66 @@ public class ReservationInfo {
 
     private final List<SubscriptionInfo> subscriptionInfos;
 
+    private final ReservationMetadata metadata;
 
-    @AllArgsConstructor
-    @Getter
-    public static class TicketsByTicketCategory {
-        private final String name;
-        private final TicketCategory.TicketAccessType ticketAccessType;
-        private final List<BookingInfoTicket> tickets;
+    public ReservationInfo(String id,
+                           String shortId,
+                           String firstName,
+                           String lastName,
+                           String email,
+                           long validity,
+                           List<TicketsByTicketCategory> ticketsByCategory,
+                           ReservationInfoOrderSummary orderSummary,
+                           TicketReservationStatus status,
+                           boolean validatedBookingInformation,
+                           Map<String, String> formattedExpirationDate,
+                           String invoiceNumber,
+                           boolean invoiceRequested,
+                           boolean invoiceOrReceiptDocumentPresent,
+                           boolean paid,
+                           boolean tokenAcquired,
+                           PaymentProxy paymentProxy,
+                           Boolean addCompanyBillingDetails,
+                           String customerReference,
+                           Boolean skipVatNr,
+                           String billingAddress,
+                           BillingDetails billingDetails,
+                           boolean containsCategoriesLinkedToGroups,
+                           Map<PaymentMethod, PaymentProxyWithParameters> activePaymentMethods,
+                           List<SubscriptionInfo> subscriptionInfos,
+                           ReservationMetadata reservationMetadata) {
+        this.id = id;
+        this.shortId = shortId;
+        this.firstName = firstName;
+        this.lastName = lastName;
+        this.email = email;
+        this.validity = validity;
+        this.ticketsByCategory = ticketsByCategory;
+        this.orderSummary = orderSummary;
+        this.status = status;
+        this.validatedBookingInformation = validatedBookingInformation;
+        this.formattedExpirationDate = formattedExpirationDate;
+        this.invoiceNumber = invoiceNumber;
+        this.invoiceRequested = invoiceRequested;
+        this.invoiceOrReceiptDocumentPresent = invoiceOrReceiptDocumentPresent;
+        this.paid = paid;
+        this.tokenAcquired = tokenAcquired;
+        this.paymentProxy = paymentProxy;
+        this.addCompanyBillingDetails = addCompanyBillingDetails;
+        this.customerReference = customerReference;
+        this.skipVatNr = skipVatNr;
+        this.billingAddress = billingAddress;
+        this.billingDetails = billingDetails;
+        this.containsCategoriesLinkedToGroups = containsCategoriesLinkedToGroups;
+        this.activePaymentMethods = activePaymentMethods;
+        this.subscriptionInfos = subscriptionInfos;
+        this.metadata = reservationMetadata;
     }
 
 
-    @AllArgsConstructor
-    public static class BookingInfoTicket {
-        private final String uuid;
-        private final String firstName;
-        private final String lastName;
-        private final String email;
-        private final String fullName;
-        private final String userLanguage;
-        private final boolean assigned;
-        private final boolean locked;
-        private final boolean acquired;
-        private final boolean cancellationEnabled;
-        private final boolean sendMailEnabled;
-        private final boolean downloadEnabled;
-        private final List<AdditionalField> ticketFieldConfiguration;
-        private final Map<String, String> formattedOnlineCheckInDate;
-        private final boolean onlineEventStarted;
-
-        public String getEmail() {
-            return email;
-        }
-
-        public String getFirstName() {
-            return firstName;
-        }
-
-        public String getLastName() {
-            return lastName;
-        }
-
-        public String getUuid() {
-            return uuid;
-        }
-
-        public String getFullName() {
-            return fullName;
-        }
-
-        public boolean isAssigned() {
-            return assigned;
-        }
-
-        public boolean isAcquired() {
-            return acquired;
-        }
-
-        public String getUserLanguage() {
-            return userLanguage;
-        }
-
-        public boolean isLocked() { return locked; }
-
-        public boolean isCancellationEnabled() {
-            return cancellationEnabled;
-        }
-
-        public List<AdditionalField> getTicketFieldConfigurationBeforeStandard() {
-            return ticketFieldConfiguration.stream().filter(AdditionalField::isBeforeStandardFields).collect(Collectors.toList());
-        }
-
-        public List<AdditionalField> getTicketFieldConfigurationAfterStandard() {
-            return ticketFieldConfiguration.stream().filter(tv -> !tv.isBeforeStandardFields()).collect(Collectors.toList());
-        }
-
-        public Map<String, String> getFormattedOnlineCheckInDate() {
-            return formattedOnlineCheckInDate;
-        }
-
-        public boolean isOnlineEventStarted() {
-            return onlineEventStarted;
-        }
-
-        public boolean isSendMailEnabled() {
-            return sendMailEnabled;
-        }
-
-        public boolean isDownloadEnabled() {
-            return downloadEnabled;
-        }
+    public record TicketsByTicketCategory(String name, TicketCategory.TicketAccessType ticketAccessType,
+                                          List<BookingInfoTicket> tickets) {
     }
-
-    @AllArgsConstructor
-    @Getter
-    public static class AdditionalField {
-        private final String name;
-        private final String value;
-        private final String type;
-        private final boolean required;
-        private final boolean editable;
-        private final Integer minLength;
-        private final Integer maxLength;
-        private final List<String> restrictedValues;
-        private final List<Field> fields;
-        private final boolean beforeStandardFields;
-        private final Map<String, Description> description;
-    }
-
-    @AllArgsConstructor
-    @Getter
-    public static class Description {
-        private final String label;
-        private final String placeholder;
-        private final Map<String, String> restrictedValuesDescription;
-    }
-
-    @AllArgsConstructor
-    @Getter
-    public static class Field {
-        private final int fieldIndex;
-        private final String fieldValue;
-    }
-
 
     @Getter
     public static class ReservationInfoOrderSummary {
@@ -216,7 +155,7 @@ public class ReservationInfo {
         public ReservationInfoOrderSummary(OrderSummary orderSummary) {
             this.summary = orderSummary.getSummary()
                 .stream()
-                .map(s -> new ReservationInfoOrderSummaryRow(s.getName(), s.getAmount(), s.getPrice(), s.getSubTotal(), s.getType()))
+                .map(s -> new ReservationInfoOrderSummaryRow(s.name(), s.amount(), s.price(), s.subTotal(), s.type(), s.taxPercentage()))
                 .collect(Collectors.toList());
             this.totalPrice = orderSummary.getTotalPrice();
             this.free = orderSummary.getFree();
@@ -229,31 +168,22 @@ public class ReservationInfo {
         }
     }
 
-    @AllArgsConstructor
-    @Getter
-    public static class ReservationInfoOrderSummaryRow {
-        private final String name;
-        private final int amount;
-        private final String price;
-        private final String subTotal;
-        private final SummaryType type;
+
+
+    public record ReservationInfoOrderSummaryRow(String name,
+                                                 int amount,
+                                                 String price,
+                                                 String subTotal,
+                                                 SummaryType type,
+                                                 String taxPercentage) {
     }
 
-    @AllArgsConstructor
-    @Getter
-    public static class SubscriptionInfo {
-        private final UUID id;
-        private final String pin;
-        private final UsageDetails usageDetails;
-        private final SubscriptionOwner owner;
+
+    public record SubscriptionInfo(UUID id, String pin, UsageDetails usageDetails, SubscriptionOwner owner, SubscriptionConfiguration configuration) {
     }
 
-    @AllArgsConstructor
-    @Getter
-    public static class SubscriptionOwner {
-        private final String firstName;
-        private final String lastName;
-        private final String email;
+
+    public record SubscriptionOwner(String firstName, String lastName, String email) {
     }
 
 }

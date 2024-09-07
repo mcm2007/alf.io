@@ -19,11 +19,14 @@ package alfio.manager;
 import alfio.config.Initializer;
 import alfio.controller.form.SearchOptions;
 import alfio.manager.support.CategoryEvaluator;
+import alfio.manager.support.extension.ExtensionCapability;
 import alfio.manager.system.ConfigurationManager;
 import alfio.manager.user.UserManager;
 import alfio.model.*;
+import alfio.model.Event.EventFormat;
 import alfio.model.PromoCodeDiscount.DiscountType;
 import alfio.model.Ticket.TicketStatus;
+import alfio.model.TicketCategory.TicketAccessType;
 import alfio.model.TicketFieldConfiguration.Context;
 import alfio.model.api.v1.admin.EventCreationRequest;
 import alfio.model.metadata.AlfioMetadata;
@@ -44,8 +47,6 @@ import alfio.util.Json;
 import alfio.util.MonetaryUtil;
 import alfio.util.RequestUtils;
 import ch.digitalfondue.npjt.AffectedRowCountAndKey;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.IterableUtils;
 import org.apache.commons.lang3.ObjectUtils;
@@ -53,6 +54,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Triple;
 import org.flywaydb.core.Flyway;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -85,13 +88,13 @@ import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static java.util.Objects.requireNonNullElse;
 import static java.util.Objects.requireNonNullElseGet;
-import static java.util.stream.Collectors.*;
+import static java.util.stream.Collectors.joining;
 
 @Component
 @Transactional
-@Log4j2
-@AllArgsConstructor
 public class EventManager {
+
+    private static final Logger log = LoggerFactory.getLogger(EventManager.class);
 
     private static final Predicate<TicketCategory> IS_CATEGORY_BOUNDED = TicketCategory::isBounded;
     static final String ERROR_ONLINE_ON_SITE_NOT_COMPATIBLE = "Cannot switch to Online. Please remove On-Site payment method first.";
@@ -120,6 +123,56 @@ public class EventManager {
     private final ClockProvider clockProvider;
     private final SubscriptionRepository subscriptionRepository;
 
+    public EventManager(UserManager userManager,
+                        EventRepository eventRepository,
+                        EventDescriptionRepository eventDescriptionRepository,
+                        TicketCategoryRepository ticketCategoryRepository,
+                        TicketCategoryDescriptionRepository ticketCategoryDescriptionRepository,
+                        TicketRepository ticketRepository,
+                        SpecialPriceRepository specialPriceRepository,
+                        PromoCodeDiscountRepository promoCodeRepository,
+                        ConfigurationManager configurationManager,
+                        TicketFieldRepository ticketFieldRepository,
+                        EventDeleterRepository eventDeleterRepository,
+                        AdditionalServiceRepository additionalServiceRepository,
+                        AdditionalServiceTextRepository additionalServiceTextRepository,
+                        Flyway flyway,
+                        Environment environment,
+                        OrganizationRepository organizationRepository,
+                        AuditingRepository auditingRepository,
+                        ExtensionManager extensionManager,
+                        GroupRepository groupRepository,
+                        NamedParameterJdbcTemplate jdbcTemplate,
+                        ConfigurationRepository configurationRepository,
+                        PaymentManager paymentManager,
+                        ClockProvider clockProvider,
+                        SubscriptionRepository subscriptionRepository) {
+        this.userManager = userManager;
+        this.eventRepository = eventRepository;
+        this.eventDescriptionRepository = eventDescriptionRepository;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.ticketCategoryDescriptionRepository = ticketCategoryDescriptionRepository;
+        this.ticketRepository = ticketRepository;
+        this.specialPriceRepository = specialPriceRepository;
+        this.promoCodeRepository = promoCodeRepository;
+        this.configurationManager = configurationManager;
+        this.ticketFieldRepository = ticketFieldRepository;
+        this.eventDeleterRepository = eventDeleterRepository;
+        this.additionalServiceRepository = additionalServiceRepository;
+        this.additionalServiceTextRepository = additionalServiceTextRepository;
+        this.flyway = flyway;
+        this.environment = environment;
+        this.organizationRepository = organizationRepository;
+        this.auditingRepository = auditingRepository;
+        this.extensionManager = extensionManager;
+        this.groupRepository = groupRepository;
+        this.jdbcTemplate = jdbcTemplate;
+        this.configurationRepository = configurationRepository;
+        this.paymentManager = paymentManager;
+        this.clockProvider = clockProvider;
+        this.subscriptionRepository = subscriptionRepository;
+    }
+
 
     public Event getSingleEvent(String eventName, String username) {
         return getOptionalByName(eventName, username).orElseThrow(IllegalStateException::new);
@@ -127,6 +180,10 @@ public class EventManager {
 
     public EventAndOrganizationId getEventAndOrganizationId(String eventName, String username) {
         return getOptionalEventAndOrganizationIdByName(eventName, username).orElseThrow(IllegalStateException::new);
+    }
+
+    public List<Integer> getEventIdsBySlug(List<String> eventSlugs, int organizationId) {
+        return eventRepository.findIdsByShortNames(eventSlugs, organizationId);
     }
 
     public Optional<Event> getOptionalByName(String eventName, String username) {
@@ -194,13 +251,15 @@ public class EventManager {
             .findFirst()
             .orElseThrow();
         int eventId = insertEvent(em);
+        Optional<EventAndOrganizationId> srcEvent = getCopiedFrom(em, username);
         Event event = eventRepository.findById(eventId);
         createOrUpdateEventDescription(eventId, em);
         createAllAdditionalServices(eventId, em.getAdditionalServices(), event.getZoneId(), event.getCurrency());
         createAdditionalFields(event, em);
-        createCategoriesForEvent(em, event);
+        createCategoriesForEvent(em, event, srcEvent);
         createAllTicketsForEvent(event, em);
-        createSubscriptionLinks(eventId, organization.getId(), em);
+        createSubscriptionLinks(eventId, organization.getId(), em.getLinkedSubscriptions());
+        srcEvent.ifPresent(eventAndOrganizationId -> copySettings(event, eventAndOrganizationId));
         extensionManager.handleEventCreation(event);
         var eventMetadata = extensionManager.handleMetadataUpdate(event, organization, AlfioMetadata.empty());
         if(eventMetadata != null) {
@@ -208,9 +267,28 @@ public class EventManager {
         }
     }
 
-    private void createSubscriptionLinks(int eventId, int organizationId, EventModification em) {
-        if(CollectionUtils.isNotEmpty(em.getLinkedSubscriptions())) {
-            var parameters = em.getLinkedSubscriptions().stream()
+    private Optional<EventAndOrganizationId> getCopiedFrom(EventModification em, String username) {
+        if (em.getMetadata() != null && StringUtils.isNotBlank(em.getMetadata().getCopiedFrom())) {
+            return getOptionalEventAndOrganizationIdByName(em.getMetadata().getCopiedFrom(), username);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Copies settings from a copied event into the new one
+     * Supported settings are:
+     * - Event-specific configuration
+     * @param event event
+     * @param srcEvent source event
+     */
+    private void copySettings(Event event, EventAndOrganizationId srcEvent) {
+        int count = configurationRepository.copyEventConfiguration(event.getId(), event.getOrganizationId(), srcEvent.getId(), srcEvent.getOrganizationId());
+        log.info("copied {} settings from source event", count);
+    }
+
+    private void createSubscriptionLinks(int eventId, int organizationId, List<UUID> linkedSubscriptions) {
+        if(CollectionUtils.isNotEmpty(linkedSubscriptions)) {
+            var parameters = linkedSubscriptions.stream()
                 .map(id -> new MapSqlParameterSource("eventId", eventId)
                     .addValue("subscriptionId", id)
                     .addValue("pricePerTicket", 0)
@@ -336,8 +414,10 @@ public class EventManager {
         Validate.isTrue(ownershipChecker.test(original.getOrganizationId()) && (sameOrganization || ownershipChecker.test(em.getOrganizationId())), "Invalid organizationId");
         int eventId = original.getId();
         Validate.isTrue(sameOrganization || groupRepository.countByEventId(eventId) == 0, "Cannot change organization because there is a group linked to this event.");
+        Validate.isTrue(sameOrganization || !subscriptionRepository.hasLinkedSubscription(eventId), "Cannot change organization because there are one or more subscriptions linked.");
 
-        if(em.getFormat() == Event.EventFormat.ONLINE && em.getFormat() != original.getFormat()) {
+        boolean formatUpdated = em.getFormat() != original.getFormat();
+        if(em.getFormat() == EventFormat.ONLINE && formatUpdated) {
             Validate.isTrue(original.getAllowedPaymentProxies().stream().allMatch(p -> p != PaymentProxy.ON_SITE), ERROR_ONLINE_ON_SITE_NOT_COMPATIBLE);
         }
 
@@ -354,11 +434,24 @@ public class EventManager {
 
         createOrUpdateEventDescription(eventId, em);
 
-
         if(!original.getBegin().equals(begin) || !original.getEnd().equals(end)) {
             fixOutOfRangeCategories(em, username, zoneId, end);
         }
+
+        if(formatUpdated) {
+            // update ticket access type for categories if the format has been updated
+            var ticketAccessType = evaluateTicketAccessType(original.getFormat(), em.getFormat());
+            ticketCategoryRepository.updateTicketAccessTypeForEvent(eventId, ticketAccessType);
+        }
+
         extensionManager.handleEventHeaderUpdate(eventRepository.findById(eventId), organizationRepository.findOrganizationForUser(username, em.getOrganizationId()).orElseThrow());
+    }
+
+    private TicketAccessType evaluateTicketAccessType(EventFormat oldFormat, EventFormat newFormat) {
+        if(newFormat == EventFormat.HYBRID) {
+            return oldFormat == EventFormat.ONLINE ? TicketAccessType.ONLINE : TicketAccessType.IN_PERSON;
+        }
+        return TicketAccessType.INHERIT;
     }
 
     public void updateEventPrices(EventAndOrganizationId original, EventModification em, String username) {
@@ -392,11 +485,15 @@ public class EventManager {
             }
         }
         int organizationId = original.getOrganizationId();
-        if(CollectionUtils.isNotEmpty(em.getLinkedSubscriptions())) {
-            int removed = subscriptionRepository.removeStaleSubscriptions(eventId, organizationId, em.getLinkedSubscriptions());
+        updateLinkedSubscriptions(em.getLinkedSubscriptions(), eventId, organizationId);
+    }
+
+    public void updateLinkedSubscriptions(List<UUID> linkedSubscriptions, int eventId, int organizationId) {
+        if(CollectionUtils.isNotEmpty(linkedSubscriptions)) {
+            int removed = subscriptionRepository.removeStaleSubscriptions(eventId, organizationId, linkedSubscriptions);
             log.trace("removed {} subscription links", removed);
-            createSubscriptionLinks(eventId, organizationId, em);
-        } else if (em.getLinkedSubscriptions() != null) {
+            createSubscriptionLinks(eventId, organizationId, linkedSubscriptions);
+        } else if (linkedSubscriptions != null) {
             // the user removed all the subscriptions
             int removed = subscriptionRepository.removeAllSubscriptionsForEvent(eventId, organizationId);
             log.trace("removed all subscription links ({}) for event {}", removed, eventId);
@@ -613,7 +710,7 @@ public class EventManager {
                     .map(ps -> buildTicketParams(event.getId(), creationDate, filteredTC, tc.getSrcPriceCts(), ps));
     }
 
-    private void createCategoriesForEvent(EventModification em, Event event) {
+    private void createCategoriesForEvent(EventModification em, Event event, Optional<EventAndOrganizationId> srcEventOptional) {
         boolean freeOfCharge = em.isFreeOfCharge();
         ZoneId zoneId = TimeZone.getTimeZone(event.getTimeZone()).toZoneId();
         int eventId = event.getId();
@@ -630,10 +727,10 @@ public class EventManager {
         em.getTicketCategories().forEach(tc -> {
             final int price = evaluatePrice(tc.getPrice(), freeOfCharge, event.getCurrency());
             final int maxTickets = tc.isBounded() ? tc.getMaxTickets() : 0;
-            var accessType = requireNonNullElse(tc.getTicketAccessType(), TicketCategory.TicketAccessType.INHERIT);
-            if(event.getFormat() == Event.EventFormat.HYBRID && accessType == TicketCategory.TicketAccessType.INHERIT) {
+            var accessType = requireNonNullElse(tc.getTicketAccessType(), TicketAccessType.INHERIT);
+            if(event.getFormat() == EventFormat.HYBRID && accessType == TicketAccessType.INHERIT) {
                 // if the event is hybrid the default is IN_PERSON
-                accessType = TicketCategory.TicketAccessType.IN_PERSON;
+                accessType = TicketAccessType.IN_PERSON;
             }
             final AffectedRowCountAndKey<Integer> category = ticketCategoryRepository.insert(tc.getInception().toZonedDateTime(zoneId),
                 tc.getExpiration().toZonedDateTime(zoneId), tc.getName(), maxTickets, tc.isTokenGenerationRequested(), eventId, tc.isBounded(), price, StringUtils.trimToNull(tc.getCode()),
@@ -646,6 +743,17 @@ public class EventManager {
             if (tc.isTokenGenerationRequested()) {
                 final TicketCategory ticketCategory = ticketCategoryRepository.getByIdAndActive(category.getKey(), event.getId());
                 specialPriceRepository.bulkInsert(ticketCategory, ticketCategory.getMaxTickets());
+            }
+
+            if (srcEventOptional.isPresent() && tc.getMetadata() != null && StringUtils.isNumeric(tc.getMetadata().getCopiedFrom())) {
+                int count = configurationRepository.copyCategoryConfiguration(event.getId(),
+                    event.getOrganizationId(),
+                    category.getKey(),
+                    srcEventOptional.get().getId(),
+                    srcEventOptional.get().getOrganizationId(),
+                    Integer.parseInt(tc.getMetadata().getCopiedFrom())
+                );
+                log.info("Copied {} settings for category {}", count, tc.getName());
             }
         });
     }
@@ -662,7 +770,7 @@ public class EventManager {
             atZone(tc.getTicketValidityEnd(), zoneId), tc.getOrdinal(),
             requireNonNullElse(tc.getTicketCheckInStrategy(), ONCE_PER_EVENT),
             requireNonNullElseGet(tc.getMetadata(), AlfioMetadata::empty),
-            requireNonNullElse(tc.getTicketAccessType(), TicketCategory.TicketAccessType.INHERIT));
+            requireNonNullElse(tc.getTicketAccessType(), TicketAccessType.INHERIT));
         TicketCategory ticketCategory = ticketCategoryRepository.getByIdAndActive(category.getKey(), eventId);
         if(tc.isBounded()) {
             List<Integer> lockedTickets = ticketRepository.selectNotAllocatedTicketsForUpdate(eventId, ticketCategory.getMaxTickets(), asList(TicketStatus.FREE.name(), TicketStatus.RELEASED.name()));
@@ -689,19 +797,18 @@ public class EventManager {
                 colorConfiguration = new CheckInOutputColorConfiguration("success", List.of(new ColorConfiguration(chosenColor, List.of(categoryId))));
             } else {
                 var configurationWithoutCategory = colorConfiguration.getConfigurations().stream()
-                    .map(cc -> new ColorConfiguration(cc.getColorName(), cc.getCategories().stream().filter(c -> !c.equals(categoryId)).collect(toUnmodifiableList())))
-                    .filter(cc -> !cc.getCategories().isEmpty())
-                    .collect(toList());
+                    .map(cc -> new ColorConfiguration(cc.getColorName(), cc.getCategories().stream().filter(c -> !c.equals(categoryId)).toList()))
+                    .filter(cc -> !cc.getCategories().isEmpty()).toList();
                 boolean colorExists = configurationWithoutCategory.stream().anyMatch(cc -> cc.getColorName().equals(chosenColor));
                 if(colorExists) {
                     colorConfiguration = new CheckInOutputColorConfiguration(colorConfiguration.getDefaultColorName(), configurationWithoutCategory.stream().map(cc -> {
-                        if(cc.getColorName().equals(chosenColor)) {
+                        if (cc.getColorName().equals(chosenColor)) {
                             var newList = new ArrayList<>(cc.getCategories());
                             newList.add(categoryId);
                             return new ColorConfiguration(chosenColor, newList);
                         }
                         return cc;
-                    }).collect(toUnmodifiableList()));
+                    }).toList());
                 } else {
                     var newList = new ArrayList<>(configurationWithoutCategory);
                     newList.add(new ColorConfiguration(chosenColor, List.of(categoryId)));
@@ -870,10 +977,11 @@ public class EventManager {
         String privateKey = UUID.randomUUID().toString();
         ZoneId zoneId = ZoneId.of(em.getZoneId());
         String currentVersion = flyway.info().current().getVersion().getVersion();
+        var eventMetadata = requireNonNullElseGet(em.getMetadata(), AlfioMetadata::empty);
         return eventRepository.insert(em.getShortName(), em.getFormat(), em.getDisplayName(), em.getWebsiteUrl(), em.getExternalUrl(), em.getTermsAndConditionsUrl(),
             em.getPrivacyPolicyUrl(), em.getImageUrl(), em.getFileBlobId(), em.getLocation(), em.getLatitude(), em.getLongitude(), em.getBegin().toZonedDateTime(zoneId),
             em.getEnd().toZonedDateTime(zoneId), em.getZoneId(), em.getCurrency(), em.getAvailableSeats(), em.isVatIncluded(),
-            vat, paymentProxies, privateKey, em.getOrganizationId(), em.getLocales(), em.getVatStatus(), em.getPriceInCents(), currentVersion, Event.Status.DRAFT, em.getMetadata()).getKey();
+            vat, paymentProxies, privateKey, em.getOrganizationId(), em.getLocales(), em.getVatStatus(), em.getPriceInCents(), currentVersion, Event.Status.DRAFT, eventMetadata).getKey();
     }
 
     private String collectPaymentProxies(EventModification em) {
@@ -916,12 +1024,14 @@ public class EventManager {
                              String description,
                              String emailReference,
                              PromoCodeDiscount.CodeType codeType,
-                             Integer hiddenCategoryId) {
+                             Integer hiddenCategoryId,
+                             String currencyCode) {
 
         Validate.isTrue(promoCode.length() >= 7, "min length is 7 chars");
         Validate.isTrue((eventId != null && organizationId == null) || (eventId == null && organizationId != null), "eventId or organizationId must be not null");
         Validate.isTrue(StringUtils.length(description) < 1025, "Description can be maximum 1024 chars");
         Validate.isTrue(StringUtils.length(emailReference) < 257, "Description can be maximum 256 chars");
+        Validate.isTrue(!PromoCodeDiscount.supportsCurrencyCode(codeType, discountType) || StringUtils.length(currencyCode) == 3, "Currency code is not valid");
 
         if(maxUsage != null) {
             Validate.isTrue(maxUsage > 0, "Invalid max usage");
@@ -934,11 +1044,11 @@ public class EventManager {
         }
 
         if(PromoCodeDiscount.CodeType.ACCESS == codeType) {
-            Validate.isTrue(hiddenCategoryId != null, "Hidden category is required");
+            Validate.notNull(hiddenCategoryId, "Hidden category is required");
         }
 
         //
-        categoriesId = Optional.ofNullable(categoriesId).orElse(Collections.emptyList()).stream().filter(Objects::nonNull).collect(toList());
+        categoriesId = Optional.ofNullable(categoriesId).orElse(Collections.emptyList()).stream().filter(Objects::nonNull).toList();
         //
 
         if (organizationId == null) {
@@ -949,7 +1059,8 @@ public class EventManager {
             discountType = DiscountType.NONE;
         }
 
-        promoCodeRepository.addPromoCode(promoCode, eventId, organizationId, start, end, discountAmount, discountType, Json.GSON.toJson(categoriesId), maxUsage, description, emailReference, codeType, hiddenCategoryId);
+        promoCodeRepository.addPromoCode(promoCode, eventId, organizationId, start, end, discountAmount, discountType,
+            Json.GSON.toJson(categoriesId), maxUsage, description, emailReference, codeType, hiddenCategoryId, currencyCode);
     }
     
     public void deletePromoCode(int promoCodeId) {
@@ -966,12 +1077,12 @@ public class EventManager {
     
     public List<PromoCodeDiscountWithFormattedTimeAndAmount> findPromoCodesInEvent(int eventId) {
         var event = eventRepository.findById(eventId);
-        return promoCodeRepository.findAllInEvent(eventId).stream().map(p -> new PromoCodeDiscountWithFormattedTimeAndAmount(p, event.getZoneId(), event.getCurrency())).collect(toList());
+        return promoCodeRepository.findAllInEvent(eventId).stream().map(p -> new PromoCodeDiscountWithFormattedTimeAndAmount(p, event.getZoneId(), event.getCurrency())).toList();
     }
 
     public List<PromoCodeDiscountWithFormattedTimeAndAmount> findPromoCodesInOrganization(int organizationId) {
         ZoneId zoneId = ZoneId.systemDefault();
-        return promoCodeRepository.findAllInOrganization(organizationId).stream().map(p -> new PromoCodeDiscountWithFormattedTimeAndAmount(p, zoneId, null)).collect(toList());
+        return promoCodeRepository.findAllInOrganization(organizationId).stream().map(p -> new PromoCodeDiscountWithFormattedTimeAndAmount(p, zoneId, null)).toList();
     }
 
     public String getEventUrl(Event event) {
@@ -993,7 +1104,7 @@ public class EventManager {
     }
 
     public List<Event> getActiveEvents() {
-        return getActiveEventsStream().collect(toList());
+        return getActiveEventsStream().toList();
     }
 
     private Stream<Event> getActiveEventsStream() {
@@ -1067,6 +1178,9 @@ public class EventManager {
             throw new IllegalArgumentException("Event not found");
         }
         int eventId = optionalEvent.get().getId();
+        if(ticketCategoryRepository.countActiveByEventId(eventId) < 2) {
+            throw new IllegalArgumentException("At least one category is required");
+        }
         var optionalCategory = getOptionalByIdAndActive(categoryId, eventId);
         if(optionalCategory.isEmpty()) {
             throw new IllegalArgumentException("Category not found");
@@ -1117,13 +1231,15 @@ public class EventManager {
     }
 
     public boolean updateMetadata(Event event, AlfioMetadata metadata) {
+        var existing = eventRepository.getMetadataForEvent(event.getId());
         var updatedMetadata = extensionManager.handleMetadataUpdate(event, organizationRepository.getById(event.getOrganizationId()), metadata);
-        eventRepository.updateMetadata(Objects.requireNonNullElse(updatedMetadata, metadata), event.getId());
+        eventRepository.updateMetadata(existing.merge(Objects.requireNonNullElse(updatedMetadata, metadata)), event.getId());
         return true;
     }
 
     public boolean updateCategoryMetadata(EventAndOrganizationId event, int categoryId, AlfioMetadata metadata) {
-        return ticketCategoryRepository.updateMetadata(metadata, event.getId(), categoryId) == 1;
+        var existing = ticketCategoryRepository.getMetadata(event.getId(), categoryId);
+        return ticketCategoryRepository.updateMetadata(existing.merge(metadata), event.getId(), categoryId) == 1;
     }
 
     public AlfioMetadata getMetadataForEvent(EventAndOrganizationId event) {
@@ -1133,4 +1249,34 @@ public class EventManager {
     public AlfioMetadata getMetadataForCategory(EventAndOrganizationId event, int categoryId) {
         return ticketCategoryRepository.getMetadata(event.getId(), categoryId);
     }
+
+    public Optional<String> executeCapability(String eventName,
+                                              String username,
+                                              ExtensionCapability capability,
+                                              Map<String, String> requestParams) {
+        return getOptionalByName(eventName, username)
+            .flatMap(event -> {
+                if (capability == ExtensionCapability.GENERATE_MEETING_LINK) {
+                    var organization = organizationRepository.getById(event.getOrganizationId());
+                    return extensionManager.handleGenerateMeetingLinkCapability(event, organization, getMetadataForEvent(event), requestParams)
+                        .map(metadata -> {
+                            eventRepository.updateMetadata(requireNonNullElseGet(metadata, AlfioMetadata::empty), event.getId());
+                            return "metadata updated";
+                        });
+                } else {
+                    return extensionManager.executeCapability(capability, requestParams, event, String.class);
+                }
+
+            });
+    }
+
+    public List<UUID> getLinkedSubscriptionIds(int eventId, int organizationId) {
+        return subscriptionRepository.findLinkedSubscriptionIds(eventId, organizationId);
+    }
+
+    public int getEventsCount() {
+        return eventRepository.countEvents();
+    }
+
+
 }

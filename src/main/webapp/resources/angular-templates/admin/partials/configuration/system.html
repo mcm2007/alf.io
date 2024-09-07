@@ -34,6 +34,16 @@
             </div>
         </div>
 
+        <div class="page-header" id="EMBED_PUBLIC_RESERVATION">
+            <h2>Embedding options</h2>
+            <span>Embed public reservation process in an iFrame</span>
+        </div>
+        <div>
+            <div data-ng-repeat="setting in systemConf.reservationEmbed.settings">
+                <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+            </div>
+        </div>
+
         <div class="page-header" id="OPENID">
             <h2>End-Users Authentication</h2>
             <span>End-Users authentication save profile</span>
@@ -45,12 +55,28 @@
         </div>
 
         <div class="page-header" id="PASS_INTEGRATION">
-            <h2>Pass Integration</h2>
-            <span>Integration with Apple (tm) Pass</span>
+            <h2>Mobile wallet integration</h2>
+            <span>Integration with mobile Wallets</span>
         </div>
-        <div>
-            <div data-ng-repeat="setting in systemConf.passIntegration.settings">
-                <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+        <div class="panel panel-default">
+            <div class="panel-heading">
+                <div class="panel-title">Google Wallet (tm) integration</div>
+            </div>
+            <div class="panel-body">
+                <div data-ng-repeat="setting in systemConf.walletIntegration.settings">
+                    <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel panel-default">
+            <div class="panel-heading">
+                <div class="panel-title">Apple Pass (tm) integration</div>
+            </div>
+            <div class="panel-body">
+                <div data-ng-repeat="setting in systemConf.passIntegration.settings">
+                    <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+                </div>
             </div>
         </div>
 
@@ -113,6 +139,9 @@
                 <div>
                     <setting obj="systemConf.mail.enableHtmlEmails" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
                 </div>
+                <div>
+                    <setting obj="systemConf.mail.mailFooter" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+                </div>
             </div>
             <div data-ng-repeat="setting in systemConf.mail.settings" data-ng-if="!systemConf.mail.type">
                 <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
@@ -161,7 +190,7 @@
         </div>
         <div class="panel panel-default">
             <div class="panel-heading">
-                <div class="panel-title"><i class="fa fa-eur"></i> EU-Specific invoice settings</div>
+                <div class="panel-title"><i class="fa fa-eur"></i> VAT settings for B2B customers</div>
             </div>
             <div class="panel-body">
                 <div data-ng-repeat="setting in systemConf.invoiceEu.settings">
@@ -274,12 +303,24 @@
             </div>
         </div>
 
-        <div class="page-header">
+        <div class="page-header" id="IMPORT_ATTENDEES">
             <h2>Import Attendees</h2>
         </div>
         <div>
             <div data-ng-repeat="setting in systemConf.importAttendee.settings">
                 <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+            </div>
+        </div>
+
+        <div class="page-header" id="SUBSCRIPTIONS">
+            <h2>Subscriptions</h2>
+        </div>
+        <div>
+            <div data-ng-repeat="setting in systemConf.subscriptions.settings">
+                <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="systemConf.delete(config)"></setting>
+                <div data-ng-if="setting.key === 'GENERATE_TICKETS_FOR_SUBSCRIPTIONS' && setting.id > -1 && setting.value === 'true'">
+                    <button class="btn btn-default" type="button" ng-click="systemConf.generateTicketsForSubscribers()">Force generation</button>
+                </div>
             </div>
         </div>
 

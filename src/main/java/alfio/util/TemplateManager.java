@@ -18,6 +18,7 @@ package alfio.util;
 
 import alfio.manager.UploadedResourceManager;
 import alfio.manager.i18n.MessageSourceManager;
+import alfio.manager.system.ConfigurationLevel;
 import alfio.manager.system.ConfigurationManager;
 import alfio.model.Event;
 import alfio.model.PurchaseContext;
@@ -25,8 +26,9 @@ import alfio.model.system.ConfigurationKeys;
 import com.samskivert.mustache.Mustache;
 import com.samskivert.mustache.Mustache.Compiler;
 import com.samskivert.mustache.Template;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSource;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.ClassPathResource;
@@ -44,19 +46,22 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import static alfio.util.MustacheCustomTag.ADDITIONAL_FIELD_VALUE;
-import static alfio.util.MustacheCustomTag.COUNTRY_NAME;
+import static alfio.util.MustacheCustomTag.*;
 
 /**
  * For hiding the ugliness :)
  * */
-@Log4j2
 public class TemplateManager {
 
+    private static final Logger log = LoggerFactory.getLogger(TemplateManager.class);
+
+
+    public static final String METADATA_ATTRIBUTES_KEY = "metadata-attributes";
+    public static final String ADDITIONAL_FIELDS_KEY = "additional-fields";
+    public static final String VAT_TRANSLATION_TEMPLATE_KEY = "vatTranslation";
+    public static final String MAIL_FOOTER = "mailFooter";
 
     private final MessageSourceManager messageSourceManager;
-
-    public static final String VAT_TRANSLATION_TEMPLATE_KEY = "vatTranslation";
 
     public enum TemplateOutput {
         TEXT, HTML
@@ -101,16 +106,22 @@ public class TemplateManager {
     
     private RenderedTemplate renderMultipartTemplate(PurchaseContext purchaseContext, TemplateResource templateResource, Map<String, Object> model, Locale locale) {
     	var enrichedModel = modelEnricher(model, purchaseContext, locale);
+        var options = configurationManager.getFor(EnumSet.of(ConfigurationKeys.MAIL_FOOTER, ConfigurationKeys.ENABLE_HTML_EMAILS), purchaseContext.getConfigurationLevel());
+        var mailFooter = options.get(ConfigurationKeys.MAIL_FOOTER);
+        enrichedModel.put("hasMailFooter", mailFooter.isPresent());
+        enrichedModel.put(MAIL_FOOTER, mailFooter.getValueOrNull());
     	var isMultipart = templateResource.isMultipart();
     	
         var textRender = render(new ClassPathResource(templateResource.classPath()), enrichedModel, locale, purchaseContext, isMultipart ? TemplateOutput.TEXT : templateResource.getTemplateOutput());
         
-        boolean htmlEnabled = configurationManager.getFor(ConfigurationKeys.ENABLE_HTML_EMAILS, purchaseContext.getConfigurationLevel()).getValueAsBooleanOrDefault();
-        
-        var htmlRender = isMultipart && htmlEnabled ? 
-        		render(new ClassPathResource(templateResource.htmlClassPath()), enrichedModel, locale, purchaseContext, TemplateOutput.HTML) :
-        		null;
-        		
+        boolean htmlEnabled = options.get(ConfigurationKeys.ENABLE_HTML_EMAILS).getValueAsBooleanOrDefault();
+
+        String htmlRender = null;
+
+        if(isMultipart && htmlEnabled) {
+            htmlRender = render(new ClassPathResource(templateResource.htmlClassPath()), enrichedModel, locale, purchaseContext, TemplateOutput.HTML);
+        }
+
     	return RenderedTemplate.multipart(textRender, htmlRender, model);
     }
 
@@ -145,15 +156,29 @@ public class TemplateManager {
 
     private String render(Resource resource, Map<String, Object> model, Locale locale, PurchaseContext purchaseContext, TemplateOutput templateOutput) {
         try {
-            ModelAndView mv = new ModelAndView((String) null, model);
+            var messageSource = messageSourceManager.getMessageSourceFor(purchaseContext);
+            var configuration = configurationManager.getFor(EnumSet.of(ConfigurationKeys.USE_PARTNER_CODE_INSTEAD_OF_PROMOTIONAL, ConfigurationKeys.ENABLE_WALLET, ConfigurationKeys.ENABLE_PASS), ConfigurationLevel.purchaseContext(purchaseContext));
+            boolean usePartnerCode = Objects.requireNonNull(configuration.get(ConfigurationKeys.USE_PARTNER_CODE_INSTEAD_OF_PROMOTIONAL))
+                .getValueAsBooleanOrDefault();
+            ModelAndView mv = new ModelAndView();
+            mv.getModelMap().addAllAttributes(model);
             mv.addObject("format-date", MustacheCustomTag.FORMAT_DATE);
             mv.addObject("country-name", COUNTRY_NAME);
-            mv.addObject("additional-field-value", ADDITIONAL_FIELD_VALUE.apply(model.get("additional-fields")));
-            mv.addObject("i18n", new CustomLocalizationMessageInterceptor(locale, messageSourceManager.getMessageSourceFor(purchaseContext)).createTranslator());
+            mv.addObject("render-markdown", RENDER_MARKDOWN);
+            mv.addObject("additional-field-value", ADDITIONAL_FIELD_VALUE.apply(model.get(ADDITIONAL_FIELDS_KEY)));
+            mv.addObject("metadata-value", ADDITIONAL_FIELD_VALUE.apply(model.get(METADATA_ATTRIBUTES_KEY)));
+            mv.addObject("i18n", new CustomLocalizationMessageInterceptor(locale, messageSource).createTranslator());
+            mv.addObject("discountCodeDescription", messageSource.getMessage("show-event.promo-code-type." + (usePartnerCode ? "partner" : "promotional"), null, locale));
+            mv.addObject("subscriptionDescription", MustacheCustomTag.subscriptionDescriptionGenerator(messageSource, model, locale));
             var updatedModel = mv.getModel();
             updatedModel.putIfAbsent("custom-header-text", "");
             updatedModel.putIfAbsent("custom-body-text", "");
             updatedModel.putIfAbsent("custom-footer-text", "");
+            boolean googleWalletEnabled = configuration.get(ConfigurationKeys.ENABLE_WALLET).getValueAsBooleanOrDefault();
+            boolean appleWalletEnabled = configuration.get(ConfigurationKeys.ENABLE_PASS).getValueAsBooleanOrDefault();
+            updatedModel.putIfAbsent("googleWalletEnabled", googleWalletEnabled);
+            updatedModel.putIfAbsent("appleWalletEnabled", appleWalletEnabled);
+            updatedModel.putIfAbsent("walletEnabled", googleWalletEnabled || appleWalletEnabled);
             return compile(resource, templateOutput).execute(mv.getModel());
         } catch (Exception e) {
             log.error("TemplateManager: got exception while generating a template", e);
@@ -169,22 +194,22 @@ public class TemplateManager {
         }
     }
 
-    private static final Pattern KEY_PATTERN = Pattern.compile("(.*?)[\\s\\[]");
+    private static final Pattern KEY_PATTERN = Pattern.compile("^([^\\[]+)[\\s\\[]");
     private static final Pattern ARGS_PATTERN = Pattern.compile("\\[(.*?)]");
 
     /**
      * Split key from (optional) arguments.
      *
-     * @param key
+     * @param key key
      * @return localization key
      */
     private static String extractKey(String key) {
         Matcher matcher = KEY_PATTERN.matcher(key);
         if (matcher.find()) {
-            return matcher.group(1);
+            return matcher.group(1).strip();
         }
 
-        return key;
+        return key.strip();
     }
 
     /**
@@ -192,7 +217,7 @@ public class TemplateManager {
      * <p/>
      * localization_key [param1] [param2] [param3]
      *
-     * @param key
+     * @param key key
      * @return List of extracted parameters
      */
     private static List<String> extractParameters(String key) {

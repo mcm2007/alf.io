@@ -44,6 +44,8 @@ import alfio.repository.audit.ScanAuditRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.repository.user.UserRepository;
+import alfio.test.util.AlfioIntegrationTest;
+import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.Test;
@@ -58,23 +60,20 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 
-import static alfio.test.util.IntegrationTestUtil.AVAILABLE_SEATS;
-import static alfio.test.util.IntegrationTestUtil.initEvent;
+import static alfio.test.util.IntegrationTestUtil.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class, ControllerConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class ReservationFlowIntegrationTest extends BaseReservationFlowTest {
+class ReservationFlowIntegrationTest extends BaseReservationFlowTest {
 
     private final OrganizationRepository organizationRepository;
     private final UserManager userManager;
-
-    private static final Map<String, String> DESCRIPTION = Collections.singletonMap("en", "desc");
+    private final CheckInManager checkInManager;
 
     @Autowired
     public ReservationFlowIntegrationTest(OrganizationRepository organizationRepository,
@@ -110,7 +109,12 @@ public class ReservationFlowIntegrationTest extends BaseReservationFlowTest {
                                           ExtensionService extensionService,
                                           PollRepository pollRepository,
                                           NotificationManager notificationManager,
-                                          UserRepository userRepository) {
+                                          UserRepository userRepository,
+                                          OrganizationDeleter organizationDeleter,
+                                          PromoCodeDiscountRepository promoCodeDiscountRepository,
+                                          PromoCodeRequestManager promoCodeRequestManager,
+                                          CheckInManager checkInManager,
+                                          ExportManager exportManager) {
         super(configurationRepository,
             eventManager,
             eventRepository,
@@ -142,9 +146,14 @@ public class ReservationFlowIntegrationTest extends BaseReservationFlowTest {
             pollRepository,
             clockProvider,
             notificationManager,
-            userRepository);
+            userRepository,
+            organizationDeleter,
+            promoCodeDiscountRepository,
+            promoCodeRequestManager,
+            exportManager);
         this.organizationRepository = organizationRepository;
         this.userManager = userManager;
+        this.checkInManager = checkInManager;
     }
 
     private ReservationFlowContext createContext() {
@@ -163,7 +172,25 @@ public class ReservationFlowIntegrationTest extends BaseReservationFlowTest {
     }
 
     @Test
-    public void inPersonEvent() throws Exception {
+    void inPersonEvent() throws Exception {
         super.testBasicFlow(this::createContext);
+    }
+
+    @Override
+    protected void performAdditionalTests(ReservationFlowContext context) {
+        var event = context.event;
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), context.userId, jdbcTemplate);
+    }
+
+    @Override
+    protected void validateCheckInData(ReservationFlowContext context) {
+        var entries = checkInManager.retrieveLogEntries(context.event.getShortName(), context.userId);
+        assertEquals(1, entries.size());
+        var entry = entries.get(0);
+        assertNotNull(entry.getTicketId());
+        assertNotNull(entry.getAttendeeData());
+        assertNotNull(entry.getAttendeeData().getMetadata());
+        assertNotNull(entry.getAudit());
+        entry.getAudit().forEach(audit -> assertEquals(context.userId + "_api", audit.username()));
     }
 }

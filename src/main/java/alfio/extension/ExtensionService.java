@@ -20,20 +20,17 @@ package alfio.extension;
 import alfio.manager.support.extension.ExtensionCapability;
 import alfio.manager.support.extension.ExtensionEvent;
 import alfio.manager.system.ExternalConfiguration;
-import alfio.model.EventAndOrganizationId;
-import alfio.model.ExtensionLog;
-import alfio.model.ExtensionSupport;
+import alfio.model.*;
 import alfio.model.ExtensionSupport.*;
-import alfio.model.PurchaseContext;
 import alfio.model.user.Organization;
 import alfio.repository.ExtensionLogRepository;
 import alfio.repository.ExtensionRepository;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -46,28 +43,45 @@ import java.util.*;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
-import static alfio.extension.ScriptingExecutionService.EXTENSION_PARAMETERS;
+import static alfio.extension.ScriptingExecutionService.EXTENSION_CONFIGURATION_PARAMETERS;
 import static java.util.Objects.requireNonNull;
 import static java.util.Objects.requireNonNullElse;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toSet;
 
 @Service
-@Log4j2
-@AllArgsConstructor
 public class ExtensionService {
 
     private static final String EVALUATE_RESULT = "res = GSON.fromJson(JSON.stringify(res), returnClass);";
     private static final String PROCESS_EXTENSION_RESULT  = "var res = executeScript(extensionEvent); " + EVALUATE_RESULT;
     private static final String PROCESS_CAPABILITY_RESULT = "var res = executeCapability(capability); " + EVALUATE_RESULT;
+    private static final String EXECUTE_SCRIPT = "executeScript(extensionEvent);";
+    private static final String OUTPUT = "output";
+    private static final String EXECUTION_KEY = "executionKey";
+    private static final String EXTENSION_EVENT = "extensionEvent";
+
     private final ScriptingExecutionService scriptingExecutionService;
     private final ExtensionRepository extensionRepository;
     private final ExtensionLogRepository extensionLogRepository;
     private final PlatformTransactionManager platformTransactionManager;
     private final ExternalConfiguration externalConfiguration;
+    private final NamedParameterJdbcTemplate jdbcTemplate;
+
+    public ExtensionService(ScriptingExecutionService scriptingExecutionService,
+                            ExtensionRepository extensionRepository,
+                            ExtensionLogRepository extensionLogRepository,
+                            PlatformTransactionManager platformTransactionManager,
+                            ExternalConfiguration externalConfiguration,
+                            NamedParameterJdbcTemplate jdbcTemplate) {
+        this.scriptingExecutionService = scriptingExecutionService;
+        this.extensionRepository = extensionRepository;
+        this.extensionLogRepository = extensionLogRepository;
+        this.platformTransactionManager = platformTransactionManager;
+        this.externalConfiguration = externalConfiguration;
+        this.jdbcTemplate = jdbcTemplate;
+    }
 
 
-    @AllArgsConstructor
+
     private static final class ExtensionLoggerImpl implements ExtensionLogger {
 
         private final ExtensionLogRepository extensionLogRepository;
@@ -75,6 +89,18 @@ public class ExtensionService {
         private final String effectivePath;
         private final String path;
         private final String name;
+
+        private ExtensionLoggerImpl(ExtensionLogRepository extensionLogRepository,
+                                    PlatformTransactionManager platformTransactionManager,
+                                    String effectivePath,
+                                    String path,
+                                    String name) {
+            this.extensionLogRepository = extensionLogRepository;
+            this.platformTransactionManager = platformTransactionManager;
+            this.effectivePath = effectivePath;
+            this.path = path;
+            this.name = name;
+        }
 
         @Override
         public void logWarning(String msg) {
@@ -116,7 +142,7 @@ public class ExtensionService {
     }
 
     @Transactional
-    public void createOrUpdate(String previousPath, String previousName, Extension script) throws Exception {
+    public void createOrUpdate(String previousPath, String previousName, Extension script) {
         Validate.notBlank(script.getName(), "Name is mandatory");
         Validate.notBlank(script.getPath(), "Path must be defined");
         ScriptValidation validation = new ScriptValidation(script.getScript());
@@ -154,11 +180,13 @@ public class ExtensionService {
             for (ExtensionMetadata.Field field : requireNonNullElse(parameters.getFields(), List.<ExtensionMetadata.Field>of())) {
                 for (String level : parameters.getConfigurationLevels()) {
                     int confFieldId = extensionRepository.registerExtensionConfigurationMetadata(extensionId, field.getName(), field.getDescription(), field.getType(), level, field.isRequired()).getKey();
-                    List<ExtensionParameterKeyValue> filteredParam = extensionParameterKeyValue.stream().filter(kv -> field.getName().equals(kv.getName()) && level.equals(kv.getConfigurationLevel())).collect(toList());
-                    for(ExtensionParameterKeyValue kv : filteredParam) {
-                        //TODO: can be optimized with a bulk insert...
-                        extensionRepository.insertSettingValue(confFieldId, kv.getConfigurationPath(), kv.getConfigurationValue());
-                    }
+                    List<ExtensionParameterKeyValue> filteredParam = extensionParameterKeyValue.stream().filter(kv -> field.getName().equals(kv.getName()) && level.equals(kv.getConfigurationLevel())).toList();
+                    var parameterSources = filteredParam.stream()
+                        .map(kv -> new MapSqlParameterSource("ecmId", confFieldId)
+                            .addValue("confPath", kv.getConfigurationPath())
+                            .addValue("value", kv.getConfigurationValue())
+                        ).toArray(MapSqlParameterSource[]::new);
+                    jdbcTemplate.batchUpdate(extensionRepository.bulkInsertSettingValue(), parameterSources);
                 }
             }
         }
@@ -210,11 +238,13 @@ public class ExtensionService {
         extensionRepository.deleteSettingValue(level, path);
         List<ExtensionMetadataValue> toUpdate2 = (toUpdate == null ? Collections.emptyList() : toUpdate);
         List<ExtensionMetadataValue> filtered = toUpdate2.stream()
-            .filter(f -> StringUtils.trimToNull(f.getValue()) != null)
-            .collect(toList());
-        for (ExtensionMetadataValue v : filtered) {
-            extensionRepository.insertSettingValue(v.getId(), path, v.getValue());
-        }
+            .filter(f -> StringUtils.trimToNull(f.getValue()) != null).toList();
+        var parameterSources = filtered.stream()
+            .map(kv -> new MapSqlParameterSource("ecmId", kv.getId())
+                .addValue("confPath", path)
+                .addValue("value", kv.getValue())
+            ).toArray(MapSqlParameterSource[]::new);
+        jdbcTemplate.batchUpdate(extensionRepository.bulkInsertSettingValue(), parameterSources);
     }
 
     @Transactional
@@ -258,14 +288,14 @@ public class ExtensionService {
     }
 
     @Transactional(readOnly = true)
-    public Set<ExtensionCapability> getSupportedCapabilities(Set<ExtensionCapability> requested, PurchaseContext purchaseContext) {
+    public Set<ExtensionCapabilitySummary> getSupportedCapabilities(Set<ExtensionCapability> requested, PurchaseContext purchaseContext) {
         var externalScriptsSupportedCapabilities = externalConfiguration.getSupportedCapabilities(requested);
-        if (externalScriptsSupportedCapabilities.equals(requested)) {
+        if (requested.stream().allMatch(capability -> externalScriptsSupportedCapabilities.stream().anyMatch(sc -> sc.getCapability() == capability))) {
             return externalScriptsSupportedCapabilities;
         }
         var result = new HashSet<>(externalScriptsSupportedCapabilities);
         var paths = generatePossiblePath(toPath(purchaseContext), Comparator.reverseOrder());
-        result.addAll(ExtensionCapability.fromString(extensionRepository.getSupportedCapabilities(paths, ExtensionCapability.toString(requested))));
+        result.addAll(extensionRepository.getSupportedCapabilities(paths, ExtensionCapability.toString(requested)));
         return result;
     }
 
@@ -283,33 +313,54 @@ public class ExtensionService {
                                              Class<T> resultType) {
         return getFirstScriptSupportingCapability(capability, basePath)
             .map(scriptPathNameHash -> {
-                Map<String, Object> context = new HashMap<>();
+                Map<String, Object> context = new HashMap<>(params);
                 context.put("capability", capability.name());
-                context.put("output", null);
-                context.put("request", params);
+                context.put(OUTPUT, null);
+                context.put(EXECUTION_KEY, UUID.randomUUID().toString());
                 context = internalExecuteScript(scriptPathNameHash, context, basePath, false, PROCESS_CAPABILITY_RESULT, resultType);
-                return resultType.cast(context.get("output"));
+                return resultType.cast(context.get(OUTPUT));
             });
     }
 
     public <T> T executeScriptsForEvent(String event, String basePath, Map<String, Object> payload, Class<T> clazz) {
         List<ScriptPathNameHash> activePaths = getActiveScriptsForEvent(event, basePath, false);
         Map<String, Object> context = new HashMap<>(payload);
-        context.put("extensionEvent", event);
-        context.put("output", null);
+        context.put(EXTENSION_EVENT, event);
+        context.put(EXECUTION_KEY, UUID.randomUUID().toString());
+        context.put(OUTPUT, null);
         for (ScriptPathNameHash activePath : activePaths) {
             context = internalExecuteScript(activePath, context, basePath, false, PROCESS_EXTENSION_RESULT, clazz);
         }
-        return clazz.cast(context.get("output"));
+        return clazz.cast(context.get(OUTPUT));
     }
 
     public void executeScriptAsync(String event, String basePath, Map<String, Object> payload) {
         List<ScriptPathNameHash> activePaths = getActiveScriptsForEvent(event, basePath, true);
         Map<String, Object> input = new HashMap<>(payload);
-        input.put("extensionEvent", event);
+        input.put(EXTENSION_EVENT, event);
+        input.put(EXECUTION_KEY, UUID.randomUUID().toString());
         for (ScriptPathNameHash activePath : activePaths) {
-            input = internalExecuteScript(activePath, input, basePath, true, "executeScript(extensionEvent);", Void.class);
+            input = internalExecuteScript(activePath, input, basePath, true, EXECUTE_SCRIPT, Void.class);
         }
+    }
+
+    public void retryFailedAsyncScript(String path, String name, Map<String, Object> payload) {
+        var extensionEvent = (String) payload.get(EXTENSION_EVENT);
+        var activePath = getActiveScriptsForEvent(extensionEvent, path, true).stream()
+            .filter(nh -> nh.getName().equals(name))
+            .findFirst()
+            .orElseThrow();
+
+        internalExecuteScript(activePath, payload, path, false, EXECUTE_SCRIPT+"\nvar res = null;", Void.class, true);
+    }
+
+    private <T> Map<String, Object> internalExecuteScript(ScriptPathNameHash activePath,
+                                                          Map<String, Object> input,
+                                                          String basePath,
+                                                          boolean async,
+                                                          String executeInstruction,
+                                                          Class<T> expectedResult) {
+        return internalExecuteScript(activePath, input, basePath, async, executeInstruction, expectedResult, false);
     }
 
     private <T> Map<String, Object> internalExecuteScript(ScriptPathNameHash activePath,
@@ -317,7 +368,8 @@ public class ExtensionService {
                                            String basePath,
                                            boolean async,
                                            String executeInstruction,
-                                           Class<T> expectedResult) {
+                                           Class<T> expectedResult,
+                                           boolean throwErrorIfNotExecuted) {
         String path = activePath.getPath();
         String name = activePath.getName();
         Pair<Set<String>, Map<String, Object>> params = addExtensionParameters(input, basePath, activePath);
@@ -330,10 +382,13 @@ public class ExtensionService {
                 scriptingExecutionService.executeScriptAsync(path, name, activePath.getHash(), scriptGetter, context, extLogger);
             } else {
                 Object res = scriptingExecutionService.executeScript(name, activePath.getHash(), scriptGetter, context, expectedResult, extLogger);
-                context.put("output", res);
+                context.put(OUTPUT, res);
             }
         } else {
-            extLogger.logInfo("script not run, missing parameters: " + params.getLeft());
+            extLogger.logWarning("script not run, missing parameters: " + params.getLeft());
+            if (throwErrorIfNotExecuted) {
+                throw new IllegalStateException("Script not run, missing parameters: "+ params.getLeft());
+            }
         }
         return context;
     }
@@ -352,7 +407,7 @@ public class ExtensionService {
     private Pair<Set<String>, Map<String, Object>> getExternalExtensionParameters(Map<String, Object> input, ScriptPathNameHash activePath) {
         Map<String, Object> copy = new HashMap<>(input);
         // we assume that external parameters are defined correctly.
-        copy.put(EXTENSION_PARAMETERS, externalConfiguration.getParametersForExtension(activePath.getName()));
+        copy.put(EXTENSION_CONFIGURATION_PARAMETERS, externalConfiguration.getParametersForExtension(activePath.getName()));
         return Pair.of(Set.of(), copy);
     }
 
@@ -367,7 +422,7 @@ public class ExtensionService {
 
         mandatory.removeAll(nameAndValues.keySet());
 
-        copy.put(EXTENSION_PARAMETERS, nameAndValues);
+        copy.put(EXTENSION_CONFIGURATION_PARAMETERS, nameAndValues);
         return Pair.of(mandatory, copy);
     }
 

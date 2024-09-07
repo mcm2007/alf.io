@@ -21,18 +21,15 @@ import alfio.model.Event.EventFormat;
 import alfio.model.system.ConfigurationKeys;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.EqualsAndHashCode;
-import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.text.StringSubstitutor;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.TimeZone;
 
-@Getter
-@EqualsAndHashCode
 public class LocationDescriptor {
 
 
@@ -91,11 +88,13 @@ public class LocationDescriptor {
     }
 
     private static String mapUrl(ConfigurationKeys.GeoInfoProvider provider) {
-        switch (provider) {
-            case GOOGLE: return "https://maps.googleapis.com/maps/api/staticmap?center=${latitude},${longitude}&key=${key}&zoom=16&size=400x400&markers=color:blue%7Clabel:E%7C${latitude},${longitude}";
-            case HERE: return "https://image.maps.ls.hereapi.com/mia/1.6/mapview?c=${latitude},${longitude}&z=16&w=400&h=400&poi=${latitude},${longitude}&apikey=${key}";
-            default: return "";
-        }
+        return switch (provider) {
+            case GOOGLE ->
+                "https://maps.googleapis.com/maps/api/staticmap?center=${latitude},${longitude}&key=${key}&zoom=16&size=400x400&markers=color:blue%7Clabel:E%7C${latitude},${longitude}";
+            case HERE ->
+                "https://image.maps.ls.hereapi.com/mia/1.6/mapview?c=${latitude},${longitude}&z=16&w=400&h=400&poi=${latitude},${longitude}&apikey=${key}";
+            default -> "";
+        };
     }
 
     private static void fillParams(ConfigurationKeys.GeoInfoProvider provider, Map<ConfigurationKeys, ConfigurationManager.MaybeConfiguration> geoConf, Map<String, String> params) {
@@ -106,4 +105,31 @@ public class LocationDescriptor {
         }
     }
 
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof LocationDescriptor that)) return false;
+        return Objects.equals(timeZone, that.timeZone) && Objects.equals(latitude, that.latitude) && Objects.equals(longitude, that.longitude) && Objects.equals(mapUrl, that.mapUrl);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(timeZone, latitude, longitude, mapUrl);
+    }
+
+    public String getTimeZone() {
+        return timeZone;
+    }
+
+    public String getLatitude() {
+        return latitude;
+    }
+
+    public String getLongitude() {
+        return longitude;
+    }
+
+    public String getMapUrl() {
+        return mapUrl;
+    }
 }

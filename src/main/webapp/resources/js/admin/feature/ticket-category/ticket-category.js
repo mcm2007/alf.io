@@ -15,13 +15,21 @@
             isLast: '<'
         },
         controller: [TicketCategoryDetailCtrl],
-        templateUrl: '../resources/js/admin/feature/ticket-category/ticket-category-detail.html'
+        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/ticket-category/ticket-category-detail.html'
     }).service('TicketCategoryEditorService', TicketCategoryEditorService);
 
     function TicketCategoryDetailCtrl() {
         var ctrl = this;
 
+        ctrl.deleteEnabled = !angular.isDefined(ctrl.event.id) || ctrl.event.ticketCategories.length > 1;
+
         ctrl.baseUrl = window.location.origin;
+
+        var applyTaxes = ctrl.ticketCategory.price > 0 && (ctrl.ticketCategory.configuration || []).findIndex(function(c) {
+            return c.key === 'APPLY_TAX_TO_CATEGORY' && c.value === 'false'
+        }) === -1;
+
+        ctrl.plusVat = applyTaxes && !ctrl.event.vatIncluded;
 
         ctrl.categoryHasDescriptions = function(category) {
             return category && category.description ? Object.keys(category.description).length > 0 : false;
@@ -92,7 +100,7 @@
         this.openCategoryDialog = function(parentScope, category, event, validationErrorHandler, reloadIfSeatsModification) {
             var editCategory = $uibModal.open({
                 size:'lg',
-                templateUrl:'/resources/angular-templates/admin/partials/event/fragment/edit-category-modal.html',
+                templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/event/fragment/edit-category-modal.html',
                 backdrop: 'static',
                 controller: function($scope) {
                     $scope.allLanguagesMapping = parentScope.allLanguagesMapping;

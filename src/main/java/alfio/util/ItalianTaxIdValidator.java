@@ -16,8 +16,6 @@
  */
 package alfio.util;
 
-import lombok.AllArgsConstructor;
-import lombok.experimental.UtilityClass;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.*;
@@ -25,8 +23,7 @@ import java.util.*;
 import static java.util.Map.entry;
 import static org.apache.commons.lang3.StringUtils.*;
 
-@UtilityClass
-public class ItalianTaxIdValidator {
+public final class ItalianTaxIdValidator {
     private static final char[] CONTROL_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".toCharArray();
     private static final String VOWELS = "AEIOU";
     private static final int COMPANY_TAX_ID_LENGTH = 11;
@@ -68,6 +65,9 @@ public class ItalianTaxIdValidator {
         entry('8', new EvenOddValueContainer(8,19)),
         entry('9', new EvenOddValueContainer(9,21))
     );
+
+    private ItalianTaxIdValidator() {
+    }
 
     public static boolean validateFiscalCode(String fiscalCode) {
         var code = StringUtils.upperCase(trimToNull(fiscalCode));
@@ -118,7 +118,7 @@ public class ItalianTaxIdValidator {
         lastNameParts.consonants.stream().limit(3).forEach(code::append);
         int chars = code.length();
         if(chars < 3) {
-            lastNameParts.vowels.stream().limit(3 - chars).forEach(code::append);
+            lastNameParts.vowels.stream().limit(3L - chars).forEach(code::append);
         }
         chars = code.length();
         code.append("X".repeat(Math.max(0, (3 - chars))));
@@ -149,6 +149,9 @@ public class ItalianTaxIdValidator {
         int sumEven = 0;
         int sumOdd = 0;
         var chars = nr.toCharArray();
+        if (chars.length != COMPANY_TAX_ID_LENGTH) {
+            return false;
+        }
         for (int i=0; i < 10; i++) {
             int val = Character.getNumericValue(chars[i]);
             if((i + 1) % 2 == 0) {
@@ -165,19 +168,16 @@ public class ItalianTaxIdValidator {
         return controlDigit == Character.getNumericValue(chars[10]);
     }
 
-    @AllArgsConstructor
-    private static class EvenOddValueContainer {
-        private final int evenValue;
-        private final int oddValue;
+
+    private record EvenOddValueContainer(int evenValue, int oddValue) {
 
         private int getValue(int index) {
             return (index + 1) % 2 == 0 ? evenValue : oddValue;
         }
     }
 
-    @AllArgsConstructor
-    private static class FiscalCodeParts {
-        private final List<Character> consonants;
-        private final List<Character> vowels;
+
+    private record FiscalCodeParts(List<Character> consonants,
+                                   List<Character> vowels) {
     }
 }

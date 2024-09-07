@@ -32,6 +32,7 @@ import alfio.model.poll.Poll;
 import alfio.repository.*;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import alfio.test.util.IntegrationTestUtil;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.time.DateUtils;
@@ -55,10 +56,9 @@ import static alfio.test.util.IntegrationTestUtil.*;
 import static alfio.test.util.TestUtil.clockProvider;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class, ControllerConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
 class PollAdminApiControllerTest {
 
     @Autowired
@@ -153,11 +153,12 @@ class PollAdminApiControllerTest {
 
         var reservationId = UUID.randomUUID().toString();
         ticketReservationRepository.createNewReservation(reservationId, ZonedDateTime.now(event.getZoneId()), DateUtils.addMinutes(new Date(), 1), null, "en", event.getId(), null, null, null, event.getOrganizationId(), null);
-        int categoryId = CollectionUtils.get(ticketCategoryRepository.findByEventIdAsMap(event.getId()), 0).getKey();
+        var firstCategory = CollectionUtils.get(ticketCategoryRepository.findByEventIdAsMap(event.getId()), 0);
+        int categoryId = firstCategory.getKey();
         var tickets = ticketRepository.findFreeByEventId(event.getId());
         var firstTicket = tickets.get(0);
         int ticketId = firstTicket.getId();
-        ticketRepository.reserveTickets(reservationId, List.of(ticketId), categoryId, "en", 0, null);
+        ticketRepository.reserveTickets(reservationId, List.of(ticketId), firstCategory.getValue(), "en", event.getVatStatus(), i -> null);
         ticketReservationRepository.updateReservationStatus(reservationId, TicketReservation.TicketReservationStatus.COMPLETE.name());
         ticketRepository.updateTicketOwner(firstTicket.getUuid(), "test@test.ch", "First Last", "First", "Last");
         ticketRepository.updateTicketsStatusWithReservationId(reservationId, Ticket.TicketStatus.ACQUIRED.name());
@@ -167,7 +168,7 @@ class PollAdminApiControllerTest {
         assertTrue(res.getStatusCode().is2xxSuccessful());
         assertTrue(CollectionUtils.isNotEmpty(res.getBody()));
         assertEquals(1, res.getBody().size());
-        assertEquals(firstTicket.getId(), res.getBody().get(0).getId());
+        assertEquals(firstTicket.getId(), res.getBody().get(0).id());
 
         // allow tickets to vote
         var poll = pollRepository.findSingleForEvent(event.getId(), pollId).orElseThrow();
@@ -182,7 +183,7 @@ class PollAdminApiControllerTest {
         assertTrue(participantRes.getStatusCode().is2xxSuccessful());
         assertTrue(CollectionUtils.isNotEmpty(participantRes.getBody()));
         assertEquals(1, participantRes.getBody().size());
-        assertEquals(firstTicket.getId(), participantRes.getBody().get(0).getId());
+        assertEquals(firstTicket.getId(), participantRes.getBody().get(0).id());
 
         // now ticket should not be returned anymore
         res = controller.findAdditionalAttendees(event.getShortName(), pollId, "First");

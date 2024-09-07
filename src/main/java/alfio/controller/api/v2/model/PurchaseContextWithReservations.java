@@ -19,8 +19,6 @@ package alfio.controller.api.v2.model;
 import alfio.model.PurchaseContext;
 import alfio.model.ReservationWithPurchaseContext;
 import alfio.util.LocaleUtil;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.Validate;
 
 import java.time.ZonedDateTime;
@@ -30,16 +28,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-@RequiredArgsConstructor
-@Getter
-public class PurchaseContextWithReservations {
-    private final Map<String, String> title;
-    private final String publicIdentifier;
-    private final PurchaseContext.PurchaseContextType type;
-    private final Map<String, String> formattedStartDate;
-    private final Map<String, String> formattedEndDate;
-    private final boolean sameDay;
-    private final List<ReservationHeader> reservations;
+public record PurchaseContextWithReservations(Map<String, String> title, String publicIdentifier,
+                                              PurchaseContext.PurchaseContextType type,
+                                              Map<String, String> formattedStartDate,
+                                              Map<String, String> formattedEndDate, boolean sameDay,
+                                              List<ReservationHeader> reservations) {
 
     public static PurchaseContextWithReservations from(List<ReservationWithPurchaseContext> reservations,
                                                        Map<Locale, String> datePatternsMap) {

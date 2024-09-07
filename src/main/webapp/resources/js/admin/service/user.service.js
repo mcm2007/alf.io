@@ -43,11 +43,17 @@
             resetPassword: function(user) {
                 return $http['put']('/admin/api/users/'+user.id+'/reset-password?baseUrl='+window.encodeURIComponent($window.location.origin)).error(HttpErrorHandler.handle);
             },
+            retrieveSystemApiKey: function() {
+                return $http.get('/admin/api/system/api-key').error(HttpErrorHandler.handle);
+            },
+            rotateSystemApiKey: function() {
+                return $http['put']('/admin/api/system/api-key').error(HttpErrorHandler.handle);
+            },
 
             showUserData: function(user) {
                 return $uibModal.open({
                     size:'sm',
-                    templateUrl:'/resources/angular-templates/admin/partials/event/fragment/show-user-data-modal.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/event/fragment/show-user-data-modal.html',
                     backdrop: 'static',
                     controller: function($scope) {
                         $scope.baseUrl = $window.location.origin;

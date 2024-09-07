@@ -36,7 +36,9 @@ import alfio.model.poll.Poll;
 import alfio.repository.*;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import alfio.test.util.IntegrationTestUtil;
+import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
 import alfio.util.PinGenerator;
 import org.apache.commons.lang3.time.DateUtils;
@@ -47,10 +49,9 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.ContextConfiguration;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -60,10 +61,9 @@ import java.util.*;
 import static alfio.test.util.IntegrationTestUtil.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class, ControllerConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
 class PollApiControllerIntegrationTest {
     private static final Logger LOGGER = LoggerFactory.getLogger(PollApiControllerIntegrationTest.class);
 
@@ -89,12 +89,15 @@ class PollApiControllerIntegrationTest {
     private TicketRepository ticketRepository;
     @Autowired
     private EventDeleterRepository eventDeleterRepository;
+    @Autowired
+    private NamedParameterJdbcTemplate jdbcTemplate;
 
     private Event event;
     private Long pollId;
     private Ticket ticket;
     private Long firstOptionId;
     private Long secondOptionId;
+    private String username;
 
 
     @BeforeEach
@@ -108,13 +111,13 @@ class PollApiControllerIntegrationTest {
                 DESCRIPTION, BigDecimal.ZERO, false, "", false, null, null, null, null, null, 0, null, null, AlfioMetadata.empty())
         );
         Pair<Event, String> eventAndUser = initEvent(categories, organizationRepository, userManager, eventManager, eventRepository);
-
+        username = eventAndUser.getRight();
         event = eventAndUser.getKey();
         var rowCountAndKey = pollRepository.insert(Map.of("en", "test poll"), null, List.of(), 0, event.getId(), event.getOrganizationId());
         pollId = rowCountAndKey.getKey();
         LOGGER.info("pollId {}", pollId);
         TicketReservationModification tr = new TicketReservationModification();
-        tr.setAmount(1);
+        tr.setQuantity(1);
         TicketCategory category = ticketCategoryRepository.findAllTicketCategories(event.getId()).get(0);
         tr.setTicketCategoryId(category.getId());
         TicketReservationWithOptionalCodeModification mod = new TicketReservationWithOptionalCodeModification(tr, Optional.empty());
@@ -128,6 +131,7 @@ class PollApiControllerIntegrationTest {
 
     @AfterEach
     void deleteAll() {
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), username, jdbcTemplate);
         eventDeleterRepository.deleteAllForEvent(event.getId());
     }
 
@@ -190,9 +194,9 @@ class PollApiControllerIntegrationTest {
         assertTrue(response.getBody().isSuccess());
         assertNotNull(response.getBody().getValue());
         var pollWithOptions = response.getBody().getValue();
-        assertEquals(2, pollWithOptions.getOptions().size());
-        assertEquals("first", pollWithOptions.getOptions().get(0).getTitle().get("en"));
-        assertEquals("second", pollWithOptions.getOptions().get(1).getTitle().get("en"));
+        assertEquals(2, pollWithOptions.options().size());
+        assertEquals("first", pollWithOptions.options().get(0).title().get("en"));
+        assertEquals("second", pollWithOptions.options().get(1).title().get("en"));
     }
 
     @Test
@@ -218,8 +222,8 @@ class PollApiControllerIntegrationTest {
 
         var statistics = pollRepository.getStatisticsFor(pollId, event.getId());
         assertEquals(1, statistics.size());
-        assertEquals(firstOptionId, statistics.get(0).getOptionId());
-        assertEquals(1, statistics.get(0).getVotes());
+        assertEquals(firstOptionId, statistics.get(0).optionId());
+        assertEquals(1, statistics.get(0).votes());
 
         // update vote
         form.setOptionId(secondOptionId);
@@ -227,8 +231,8 @@ class PollApiControllerIntegrationTest {
         assertTrue(response.getStatusCode().is2xxSuccessful());
         statistics = pollRepository.getStatisticsFor(pollId, event.getId());
         assertEquals(1, statistics.size());
-        assertEquals(secondOptionId, statistics.get(0).getOptionId());
-        assertEquals(1, statistics.get(0).getVotes());
+        assertEquals(secondOptionId, statistics.get(0).optionId());
+        assertEquals(1, statistics.get(0).votes());
     }
 
     private void updateVisibility(Poll.PollStatus status) {

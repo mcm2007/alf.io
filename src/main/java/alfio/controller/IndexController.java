@@ -16,10 +16,10 @@
  */
 package alfio.controller;
 
-import alfio.config.Initializer;
-import alfio.config.WebSecurityConfig;
-import alfio.config.authentication.support.OpenIdAlfioAuthentication;
+import alfio.controller.api.v2.model.Language;
 import alfio.controller.api.v2.user.support.EventLoader;
+import alfio.controller.support.CSPConfigurer;
+import alfio.manager.PurchaseContextManager;
 import alfio.manager.i18n.MessageSourceManager;
 import alfio.manager.openid.OpenIdAuthenticationManager;
 import alfio.manager.system.ConfigurationLevel;
@@ -29,29 +29,19 @@ import alfio.model.EventDescription;
 import alfio.model.FileBlobMetadata;
 import alfio.model.TicketReservationStatusAndValidation;
 import alfio.model.system.ConfigurationKeys;
-import alfio.model.user.Role;
 import alfio.repository.*;
 import alfio.repository.user.OrganizationRepository;
 import alfio.util.Json;
 import alfio.util.MustacheCustomTag;
 import alfio.util.RequestUtils;
-import alfio.util.TemplateManager;
 import ch.digitalfondue.jfiveparse.*;
-import lombok.AllArgsConstructor;
-import org.apache.commons.codec.binary.Hex;
-import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.IterableUtils;
-import org.apache.commons.collections4.IteratorUtils;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.env.Environment;
-import org.springframework.core.env.Profiles;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.context.annotation.Profile;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.GrantedAuthority;
-import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.web.csrf.CsrfToken;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.stereotype.Controller;
-import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.util.UriComponentsBuilder;
@@ -63,44 +53,26 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
-import java.security.Principal;
-import java.security.SecureRandom;
 import java.util.*;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
-import static alfio.model.system.ConfigurationKeys.*;
+import static alfio.config.Initializer.PROFILE_LIVE;
+import static alfio.controller.Constants.*;
+import static alfio.model.system.ConfigurationKeys.BASE_CUSTOM_CSS;
+import static alfio.util.HttpUtils.APPLICATION_JSON;
+import static java.util.Objects.requireNonNull;
 
 @Controller
-@AllArgsConstructor
+@Profile(PROFILE_LIVE)
 public class IndexController {
 
-    private static final String REDIRECT_ADMIN = "redirect:/admin/";
     private static final String TEXT_HTML_CHARSET_UTF_8 = "text/html;charset=UTF-8";
     private static final String UTF_8 = "UTF-8";
 
-
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
-
-    private static final Document INDEX_PAGE;
-    private static final Document OPEN_GRAPH_PAGE;
-
-    static {
-        try (var idxIs = new ClassPathResource("alfio-public-frontend-index.html").getInputStream();
-             var idxOpenIs = new ClassPathResource("alfio/web-templates/event-open-graph-page.html").getInputStream();
-             var idxIsR = new InputStreamReader(idxIs, StandardCharsets.UTF_8);
-             var idxOpenGraphReader = new InputStreamReader(idxOpenIs, StandardCharsets.UTF_8)) {
-            INDEX_PAGE = JFiveParse.parse(idxIsR);
-            OPEN_GRAPH_PAGE = JFiveParse.parse(idxOpenGraphReader);
-        } catch (IOException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
+    private final Document indexPage;
+    private final Document openGraphPage;
     private final ConfigurationManager configurationManager;
     private final EventRepository eventRepository;
-    private final Environment environment;
-    private final TemplateManager templateManager;
     private final FileUploadRepository fileUploadRepository;
     private final MessageSourceManager messageSourceManager;
     private final EventDescriptionRepository eventDescriptionRepository;
@@ -108,6 +80,47 @@ public class IndexController {
     private final TicketReservationRepository ticketReservationRepository;
     private final SubscriptionRepository subscriptionRepository;
     private final EventLoader eventLoader;
+    private final PurchaseContextManager purchaseContextManager;
+    private final Json json;
+    private final CsrfTokenRepository csrfTokenRepository;
+    private final CSPConfigurer cspConfigurer;
+
+    public IndexController(ConfigurationManager configurationManager,
+                           EventRepository eventRepository,
+                           FileUploadRepository fileUploadRepository,
+                           MessageSourceManager messageSourceManager,
+                           EventDescriptionRepository eventDescriptionRepository,
+                           OrganizationRepository organizationRepository,
+                           TicketReservationRepository ticketReservationRepository,
+                           SubscriptionRepository subscriptionRepository,
+                           EventLoader eventLoader,
+                           PurchaseContextManager purchaseContextManager,
+                           CsrfTokenRepository csrfTokenRepository,
+                           CSPConfigurer cspConfigurer,
+                           Json json) {
+        this.configurationManager = configurationManager;
+        this.eventRepository = eventRepository;
+        this.fileUploadRepository = fileUploadRepository;
+        this.messageSourceManager = messageSourceManager;
+        this.eventDescriptionRepository = eventDescriptionRepository;
+        this.organizationRepository = organizationRepository;
+        this.ticketReservationRepository = ticketReservationRepository;
+        this.subscriptionRepository = subscriptionRepository;
+        this.eventLoader = eventLoader;
+        this.purchaseContextManager = purchaseContextManager;
+        this.csrfTokenRepository = csrfTokenRepository;
+        this.cspConfigurer = cspConfigurer;
+        this.json = json;
+        try (var idxIs = new ClassPathResource("alfio-public-frontend-index.html").getInputStream();
+             var idxOpenIs = new ClassPathResource("alfio/web-templates/event-open-graph-page.html").getInputStream();
+             var idxIsR = new InputStreamReader(idxIs, StandardCharsets.UTF_8);
+             var idxOpenGraphReader = new InputStreamReader(idxOpenIs, StandardCharsets.UTF_8)) {
+            indexPage = JFiveParse.parse(idxIsR);
+            openGraphPage = JFiveParse.parse(idxOpenGraphReader);
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
 
     @RequestMapping(value = "/", method = RequestMethod.HEAD)
@@ -157,6 +170,7 @@ public class IndexController {
     @GetMapping({
         "/",
         "/o/*",
+        "/o/*/events-all",
         "/events-all",
         "/event/{eventShortName}",
         "/event/{eventShortName}/reservation/{reservationId}/book",
@@ -174,6 +188,7 @@ public class IndexController {
         //
         // subscription
         "/subscriptions-all",
+        "/o/*/subscriptions-all",
         "/subscription/{subscriptionId}",
         "/subscription/{subscriptionId}/reservation/{reservationId}/book",
         "/subscription/{subscriptionId}/reservation/{reservationId}/overview",
@@ -191,7 +206,7 @@ public class IndexController {
         "/my-orders",
         "/my-profile",
     })
-    public void replyToIndex(@PathVariable(value = "eventShortName", required = false) String eventShortName,
+    public void replyToIndex(@PathVariable(value = EVENT_SHORT_NAME, required = false) String eventShortName,
                              @PathVariable(value = "subscriptionId", required = false) String subscriptionId,
                              @RequestHeader(value = "User-Agent", required = false) String userAgent,
                              @RequestParam(value = "lang", required = false) String lang,
@@ -201,50 +216,55 @@ public class IndexController {
 
         response.setContentType(TEXT_HTML_CHARSET_UTF_8);
         response.setCharacterEncoding(UTF_8);
-        var nonce = addCspHeader(response);
+        var nonce = cspConfigurer.addCspHeader(response, detectConfigurationLevel(eventShortName, subscriptionId), true);
 
         if (eventShortName != null && RequestUtils.isSocialMediaShareUA(userAgent) && eventRepository.existsByShortName(eventShortName)) {
             try (var os = response.getOutputStream(); var osw = new OutputStreamWriter(os, StandardCharsets.UTF_8)) {
-                var res = getOpenGraphPage((Document) OPEN_GRAPH_PAGE.cloneNode(true), eventShortName, request, lang);
+                var res = getOpenGraphPage((Document) openGraphPage.cloneNode(true), eventShortName, request, lang);
                 JFiveParse.serialize(res, osw);
             }
         } else {
             try (var os = response.getOutputStream(); var osw = new OutputStreamWriter(os, StandardCharsets.UTF_8)) {
                 var baseCustomCss = configurationManager.getForSystem(BASE_CUSTOM_CSS).getValueOrNull();
-                var idx = INDEX_PAGE.cloneNode(true);
+                var idx = indexPage.cloneNode(true);
                 if(session.getAttribute(OpenIdAuthenticationManager.USER_SIGNED_UP) != null) {
                     Optional.ofNullable(IterableUtils.get(idx.getElementsByTagName("html"), 0))
                             .ifPresent(html -> html.setAttribute("data-signed-up", "true"));
                     session.removeAttribute(OpenIdAuthenticationManager.USER_SIGNED_UP);
                 }
-                idx.getElementsByTagName("script").forEach(element -> element.setAttribute("nonce", nonce));
+                idx.getElementsByTagName("script").forEach(element -> element.setAttribute(NONCE, nonce));
                 var head = idx.getElementsByTagName("head").get(0);
-                head.appendChild(buildScripTag(Json.toJson(configurationManager.getInfo(session)), "application/json", "preload-info", null));
-                head.appendChild(buildScripTag(Json.toJson(messageSourceManager.getBundleAsMap("alfio.i18n.public", true, "en")), "application/json", "preload-bundle", "en"));
+                head.appendChild(buildScripTag(json.asJsonString(configurationManager.getInfo(session)), APPLICATION_JSON, "preload-info", null));
+                var httpServletRequest = requireNonNull(request.getNativeRequest(HttpServletRequest.class));
+                head.appendChild(buildMetaTag("GID", request.getSessionId()));
+                var csrf = csrfTokenRepository.loadToken(httpServletRequest);
+                if (csrf == null) {
+                    csrf = csrfTokenRepository.generateToken(httpServletRequest);
+                }
+                head.appendChild(buildMetaTag("XSRF_TOKEN", csrf.getToken()));
                 if (baseCustomCss != null) {
                     var style = new Element("style");
                     style.setAttribute("type", "text/css");
                     style.appendChild(new Text(baseCustomCss));
                     head.appendChild(style);
                 }
-                if (eventShortName != null) {
-                    eventLoader.loadEventInfo(eventShortName, session).ifPresent(ev -> {
-                        head.appendChild(buildScripTag(Json.toJson(ev), "application/json", "preload-event", eventShortName));
-                    });
-                }
+                preloadTranslations(eventShortName, request, session, eventLoader, head, messageSourceManager, idx, json, lang);
                 JFiveParse.serialize(idx, osw);
             }
         }
     }
 
     @GetMapping("/event/{eventShortName}/reservation/{reservationId}")
-    public String redirectEventToReservation(@PathVariable(value = "eventShortName") String eventShortName, @PathVariable(value = "reservationId") String reservationId) {
+    public String redirectEventToReservation(@PathVariable(value = EVENT_SHORT_NAME) String eventShortName,
+                                             @PathVariable(value = "reservationId") String reservationId,
+                                             @RequestParam(value = "subscription", required = false) String subscriptionId) {
         if (eventRepository.existsByShortName(eventShortName)) {
             var reservationStatusUrlSegment = ticketReservationRepository.findOptionalStatusAndValidationById(reservationId)
-                .map(IndexController::reservationStatusToUrlMapping).orElse("not-found");
-
-            return "redirect:" + UriComponentsBuilder.fromPath("/event/{eventShortName}/reservation/{reservationId}/{status}")
-                .buildAndExpand(Map.of("eventShortName", eventShortName, "reservationId", reservationId, "status",reservationStatusUrlSegment))
+                .map(IndexController::reservationStatusToUrlMapping).orElse(NOT_FOUND);
+            return REDIRECT + UriComponentsBuilder.fromPath("/event/{eventShortName}/reservation/{reservationId}/{status}")
+                // if subscription param is present, we forward it to the reservation resource
+                .queryParamIfPresent("subscription", Optional.ofNullable(StringUtils.trimToNull(subscriptionId)))
+                .buildAndExpand(Map.of(EVENT_SHORT_NAME, eventShortName, "reservationId", reservationId, "status",reservationStatusUrlSegment))
                 .toUriString();
         } else {
             return "redirect:/";
@@ -255,14 +275,41 @@ public class IndexController {
     public String redirectSubscriptionToReservation(@PathVariable("subscriptionId") String subscriptionId, @PathVariable("reservationId") String reservationId) {
         if (subscriptionRepository.existsById(UUID.fromString(subscriptionId))) {
             var reservationStatusUrlSegment = ticketReservationRepository.findOptionalStatusAndValidationById(reservationId)
-                .map(IndexController::reservationStatusToUrlMapping).orElse("not-found");
+                .map(IndexController::reservationStatusToUrlMapping).orElse(NOT_FOUND);
 
-            return "redirect:" + UriComponentsBuilder.fromPath("/subscription/{subscriptionId}/reservation/{reservationId}/{status}")
+            return REDIRECT + UriComponentsBuilder.fromPath("/subscription/{subscriptionId}/reservation/{reservationId}/{status}")
                 .buildAndExpand(Map.of("subscriptionId", subscriptionId, "reservationId", reservationId, "status",reservationStatusUrlSegment))
                 .toUriString();
         } else {
             return "redirect:/";
         }
+    }
+
+    static void preloadTranslations(String eventShortName,
+                                    ServletWebRequest request,
+                                    HttpSession session,
+                                    EventLoader eventLoader,
+                                    Element head,
+                                    MessageSourceManager messageSourceManager,
+                                    Node idx,
+                                    Json json,
+                                    String lang) {
+        String preloadLang = Objects.requireNonNullElse(lang, "en");
+        if (eventShortName != null) {
+            var eventInfoOptional = eventLoader.loadEventInfo(eventShortName, session);
+            if (eventInfoOptional.isPresent()) {
+                var ev = eventInfoOptional.get();
+                head.appendChild(buildScripTag(json.asJsonString(ev), APPLICATION_JSON, "preload-event", eventShortName));
+                preloadLang = getMatchingLocale(request, ev.getContentLanguages().stream().map(Language::getLocale).toList(), lang).getLanguage();
+            }
+        }
+        head.appendChild(buildScripTag(json.asJsonString(messageSourceManager.getBundleAsMap("alfio.i18n.public", true, preloadLang, MessageSourceManager.PUBLIC_FRONTEND)), "application/json", "preload-bundle", preloadLang));
+        // add fallback in english
+        if (!"en".equals(preloadLang)) {
+            head.appendChild(buildScripTag(json.asJsonString(messageSourceManager.getBundleAsMap("alfio.i18n.public", true, "en", MessageSourceManager.PUBLIC_FRONTEND)), "application/json", "preload-bundle", "en"));
+        }
+        var htmlElement = IterableUtils.get(idx.getElementsByTagName("html"), 0);
+        htmlElement.setAttribute("lang", preloadLang);
     }
 
     private static Element buildScripTag(String content, String type, String id, String param) {
@@ -277,27 +324,39 @@ public class IndexController {
     }
 
     private static String reservationStatusToUrlMapping(TicketReservationStatusAndValidation status) {
-        switch (status.getStatus()) {
-            case PENDING: return Boolean.TRUE.equals(status.getValidated()) ? "overview" : "book";
-            case COMPLETE: return "success";
-            case OFFLINE_PAYMENT: return "waiting-payment";
-            case DEFERRED_OFFLINE_PAYMENT: return "deferred-payment";
-            case EXTERNAL_PROCESSING_PAYMENT:
-            case WAITING_EXTERNAL_CONFIRMATION: return "processing-payment";
-            case IN_PAYMENT:
-            case STUCK: return "error";
-            default: return "not-found"; // <- this may be a little bit aggressive
+        return switch (status.getStatus()) {
+            case PENDING -> Boolean.TRUE.equals(status.getValidated()) ? "overview" : "book";
+            case COMPLETE, FINALIZING -> "success";
+            case OFFLINE_PAYMENT, OFFLINE_FINALIZING -> "waiting-payment";
+            case DEFERRED_OFFLINE_PAYMENT -> "deferred-payment";
+            case EXTERNAL_PROCESSING_PAYMENT, WAITING_EXTERNAL_CONFIRMATION -> "processing-payment";
+            case IN_PAYMENT, STUCK -> "error";
+            default -> NOT_FOUND; // <- this may be a little bit aggressive
+        };
+    }
+
+
+    /**
+     * Return the best matching locale.
+     *
+     * @param request
+     * @param contextLanguages list of languages configured for the event (o other contexts)
+     * @param lang override passed as parameter
+     * @return
+     */
+    private static Locale getMatchingLocale(ServletWebRequest request, List<String> contextLanguages, String lang) {
+        var locale = RequestUtils.getMatchingLocale(request, contextLanguages);
+        if (lang != null && contextLanguages.stream().anyMatch(lang::equalsIgnoreCase)) {
+            locale = Locale.forLanguageTag(lang);
         }
+        return locale;
     }
 
     // see https://github.com/alfio-event/alf.io/issues/708
     // use ngrok to test the preview
     private Document getOpenGraphPage(Document eventOpenGraph, String eventShortName, ServletWebRequest request, String lang) {
         var event = eventRepository.findByShortName(eventShortName);
-        var locale = RequestUtils.getMatchingLocale(request, event);
-        if (lang != null && event.getContentLanguages().stream().map(ContentLanguage::getLanguage).anyMatch(lang::equalsIgnoreCase)) {
-            locale = Locale.forLanguageTag(lang);
-        }
+        var locale = getMatchingLocale(request, event.getContentLanguages().stream().map(ContentLanguage::getLanguage).toList(), lang);
 
         var baseUrl = configurationManager.getForSystem(ConfigurationKeys.BASE_URL).getRequiredValue();
 
@@ -309,37 +368,45 @@ public class IndexController {
 
         //
 
-        getMetaElement(eventOpenGraph, "name", "twitter:image").setAttribute("content", baseUrl + "/file/" + event.getFileBlobId());
+        getMetaElement(eventOpenGraph, "name", "twitter:image").setAttribute(CONTENT, baseUrl + "/file/" + event.getFileBlobId());
         //
 
         eventOpenGraph.getElementsByTagName("title").get(0).appendChild(new Text(title));
-        getMetaElement(eventOpenGraph, "property", "og:title").setAttribute("content", title);
-        getMetaElement(eventOpenGraph, "property","og:image").setAttribute("content", baseUrl + "/file/" + event.getFileBlobId());
+        getMetaElement(eventOpenGraph, PROPERTY, "og:title").setAttribute(CONTENT, title);
+        getMetaElement(eventOpenGraph, PROPERTY,"og:image").setAttribute(CONTENT, baseUrl + "/file/" + event.getFileBlobId());
 
         var eventDesc = eventDescriptionRepository.findDescriptionByEventIdTypeAndLocale(event.getId(), EventDescription.EventDescriptionType.DESCRIPTION, locale.toLanguageTag()).orElse("").trim();
         var firstLine = Pattern.compile("\n").splitAsStream(MustacheCustomTag.renderToTextCommonmark(eventDesc)).findFirst().orElse("");
-        getMetaElement(eventOpenGraph, "property","og:description").setAttribute("content", firstLine);
+        getMetaElement(eventOpenGraph, PROPERTY,"og:description").setAttribute(CONTENT, firstLine);
 
 
         var org = organizationRepository.getById(event.getOrganizationId());
         var author = String.format("%s <%s>", org.getName(), org.getEmail());
-        getMetaElement(eventOpenGraph, "name", "author").setAttribute("content", author);
+        getMetaElement(eventOpenGraph, "name", "author").setAttribute(CONTENT, author);
 
         fileUploadRepository.findById(event.getFileBlobId()).ifPresent(metadata -> {
             var attributes = metadata.getAttributes();
             if (attributes.containsKey(FileBlobMetadata.ATTR_IMG_HEIGHT) && attributes.containsKey(FileBlobMetadata.ATTR_IMG_WIDTH)) {
-                head.appendChild(buildMetaTag("og:image:width", attributes.get(FileBlobMetadata.ATTR_IMG_WIDTH)));
-                head.appendChild(buildMetaTag("og:image:height", attributes.get(FileBlobMetadata.ATTR_IMG_HEIGHT)));
+                head.appendChild(buildOGMetaTag("og:image:width", attributes.get(FileBlobMetadata.ATTR_IMG_WIDTH)));
+                head.appendChild(buildOGMetaTag("og:image:height", attributes.get(FileBlobMetadata.ATTR_IMG_HEIGHT)));
             }
         });
 
         return eventOpenGraph;
     }
 
-    private static Element buildMetaTag(String propertyValue, String contentValue) {
+    private static Element buildOGMetaTag(String propertyValue, String contentValue) {
+        return buildMetaTag(PROPERTY, propertyValue, contentValue);
+    }
+
+    private static Element buildMetaTag(String name, String content) {
+        return buildMetaTag("name", name, content);
+    }
+
+    private static Element buildMetaTag(String property, String propertyValue, String content) {
         var meta = new Element("meta");
-        meta.setAttribute("property", propertyValue);
-        meta.setAttribute("content", contentValue);
+        meta.setAttribute(property, propertyValue);
+        meta.setAttribute(CONTENT, content);
         return meta;
     }
 
@@ -350,132 +417,19 @@ public class IndexController {
     @GetMapping(value = {
         "/event/{eventShortName}/code/{code}",
         "/e/{eventShortName}/c/{code}"})
-    public String redirectCode(@PathVariable("eventShortName") String eventName,
+    public String redirectCode(@PathVariable(EVENT_SHORT_NAME) String eventName,
                                @PathVariable("code") String code) {
-        return "redirect:" + UriComponentsBuilder.fromPath("/api/v2/public/event/{eventShortName}/code/{code}")
-            .build(Map.of("eventShortName", eventName, "code", code));
+        return REDIRECT + UriComponentsBuilder.fromPath("/api/v2/public/event/{eventShortName}/code/{code}")
+            .build(Map.of(EVENT_SHORT_NAME, eventName, "code", code));
     }
 
     @GetMapping("/e/{eventShortName}")
-    public String redirectEvent(@PathVariable("eventShortName") String eventName) {
-        return "redirect:" + UriComponentsBuilder.fromPath("/event/{eventShortName}").build(Map.of("eventShortName", eventName));
+    public String redirectEvent(@PathVariable(EVENT_SHORT_NAME) String eventName) {
+        return REDIRECT + UriComponentsBuilder.fromPath("/event/{eventShortName}").build(Map.of(EVENT_SHORT_NAME, eventName));
     }
 
-    // login related
-    @GetMapping("/authentication")
-    public void getLoginPage(@RequestParam(value="failed", required = false) String failed, @RequestParam(value = "recaptchaFailed", required = false) String recaptchaFailed,
-                             Model model,
-                             Principal principal,
-                             HttpServletRequest request,
-                             HttpServletResponse response) throws IOException {
-        if(principal != null) {
-            response.sendRedirect("/admin/");
-            return;
-        }
-        model.addAttribute("failed", failed != null);
-        model.addAttribute("recaptchaFailed", recaptchaFailed != null);
-        model.addAttribute("hasRecaptchaApiKey", false);
-
-        //
-        addCommonModelAttributes(model, request);
-        //
-
-        var configuration = configurationManager.getFor(EnumSet.of(RECAPTCHA_API_KEY, ENABLE_CAPTCHA_FOR_LOGIN), ConfigurationLevel.system());
-
-        configuration.get(RECAPTCHA_API_KEY).getValue()
-            .filter(key -> configuration.get(ENABLE_CAPTCHA_FOR_LOGIN).getValueAsBooleanOrDefault())
-            .ifPresent(key -> {
-                model.addAttribute("hasRecaptchaApiKey", true);
-                model.addAttribute("recaptchaApiKey", key);
-            });
-        try (var os = response.getOutputStream()) {
-            response.setContentType(TEXT_HTML_CHARSET_UTF_8);
-            response.setCharacterEncoding(UTF_8);
-            var nonce = addCspHeader(response);
-            model.addAttribute("nonce", nonce);
-            templateManager.renderHtml(new ClassPathResource("alfio/web-templates/login.ms"), model.asMap(), os);
-        }
-    }
-
-    @PostMapping("/authenticate")
-    public String doLogin() {
-        return REDIRECT_ADMIN;
-    }
-    //
-
-
-    // admin index
-    @GetMapping("/admin")
-    public void adminHome(Model model, @Value("${alfio.version}") String version, HttpServletRequest request, HttpServletResponse response, Principal principal) throws IOException {
-        model.addAttribute("alfioVersion", version);
-        model.addAttribute("username", principal.getName());
-        model.addAttribute("basicConfigurationNeeded", configurationManager.isBasicConfigurationNeeded());
-
-        boolean isDBAuthentication = !(principal instanceof OpenIdAlfioAuthentication);
-        model.addAttribute("isDBAuthentication", isDBAuthentication);
-        if (!isDBAuthentication) {
-            String idpLogoutRedirectionUrl = ((OpenIdAlfioAuthentication) SecurityContextHolder.getContext().getAuthentication()).getIdpLogoutRedirectionUrl();
-            model.addAttribute("idpLogoutRedirectionUrl", idpLogoutRedirectionUrl);
-        } else {
-            model.addAttribute("idpLogoutRedirectionUrl", null);
-        }
-
-        Collection<String> authorities = SecurityContextHolder.getContext().getAuthentication().getAuthorities()
-            .stream().map(GrantedAuthority::getAuthority).collect(Collectors.toList());
-
-        boolean isAdmin = authorities.contains(Role.ADMIN.getRoleName());
-        model.addAttribute("isOwner", isAdmin || authorities.contains(Role.OWNER.getRoleName()));
-        model.addAttribute("isAdmin", isAdmin);
-        //
-        addCommonModelAttributes(model, request);
-        model.addAttribute("displayProjectBanner", isAdmin && configurationManager.getForSystem(SHOW_PROJECT_BANNER).getValueAsBooleanOrDefault());
-        //
-
-        try (var os = response.getOutputStream()) {
-            response.setContentType(TEXT_HTML_CHARSET_UTF_8);
-            response.setCharacterEncoding(UTF_8);
-            var nonce = addCspHeader(response);
-            model.addAttribute("nonce", nonce);
-            templateManager.renderHtml(new ClassPathResource("alfio/web-templates/admin-index.ms"), model.asMap(), os);
-        }
-    }
-
-    private void addCommonModelAttributes(Model model, HttpServletRequest request) {
-        model.addAttribute("request", request);
-        model.addAttribute("demoModeEnabled", environment.acceptsProfiles(Profiles.of(Initializer.PROFILE_DEMO)));
-        model.addAttribute("devModeEnabled", environment.acceptsProfiles(Profiles.of(Initializer.PROFILE_DEV)));
-        model.addAttribute("prodModeEnabled", environment.acceptsProfiles(Profiles.of(Initializer.PROFILE_LIVE)));
-        model.addAttribute(WebSecurityConfig.CSRF_PARAM_NAME, request.getAttribute(CsrfToken.class.getName()));
-    }
-
-
-    private static String getNonce() {
-        var nonce = new byte[16]; //128 bit = 16 bytes
-        SECURE_RANDOM.nextBytes(nonce);
-        return Hex.encodeHexString(nonce);
-    }
-
-    public String addCspHeader(HttpServletResponse response) {
-
-        String nonce = getNonce();
-
-        String reportUri = "";
-
-        var conf = configurationManager.getFor(List.of(ConfigurationKeys.SECURITY_CSP_REPORT_ENABLED, ConfigurationKeys.SECURITY_CSP_REPORT_URI), ConfigurationLevel.system());
-
-        boolean enabledReport = conf.get(ConfigurationKeys.SECURITY_CSP_REPORT_ENABLED).getValueAsBooleanOrDefault();
-        if (enabledReport) {
-            reportUri = " report-uri " + conf.get(ConfigurationKeys.SECURITY_CSP_REPORT_URI).getValueOrDefault("/report-csp-violation");
-        }
-        //
-        // https://csp.withgoogle.com/docs/strict-csp.html
-        // with base-uri set to 'self'
-
-        response.addHeader("Content-Security-Policy", "object-src 'none'; "+
-            "script-src 'strict-dynamic' 'nonce-" + nonce + "' 'unsafe-inline' http: https:; " +
-            "base-uri 'self'; "
-            + reportUri);
-
-        return nonce;
+    private ConfigurationLevel detectConfigurationLevel(String eventShortName, String subscriptionId) {
+        return purchaseContextManager.detectConfigurationLevel(eventShortName, subscriptionId)
+            .orElseGet(ConfigurationLevel::system);
     }
 }

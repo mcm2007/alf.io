@@ -18,9 +18,9 @@ package alfio.util;
 
 import alfio.model.ContentLanguage;
 import alfio.model.Event;
-import lombok.experimental.UtilityClass;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections4.IteratorUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.web.context.request.ServletWebRequest;
@@ -29,18 +29,18 @@ import javax.servlet.ServletInputStream;
 import javax.servlet.http.HttpServletRequest;
 import java.nio.charset.StandardCharsets;
 import java.security.Principal;
-import java.util.Collections;
-import java.util.List;
-import java.util.Locale;
-import java.util.Optional;
+import java.util.*;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 
-@Log4j2
-@UtilityClass
-public class RequestUtils {
+public final class RequestUtils {
+
+    private RequestUtils() {
+    }
+
+    private static final Logger log = LoggerFactory.getLogger(RequestUtils.class);
 
     public static Optional<String> readRequest(HttpServletRequest request) {
         try (ServletInputStream is = request.getInputStream()){
@@ -58,6 +58,14 @@ public class RequestUtils {
     }
 
 
+    public static Locale getMatchingLocale(ServletWebRequest request, List<String> allowedLanguages) {
+        var l = requireNonNull(request.getNativeRequest(HttpServletRequest.class)).getLocales();
+        List<Locale> locales = l != null ? IteratorUtils.toList(l.asIterator()) : Collections.emptyList();
+        var selectedLocale = locales.stream().map(Locale::getLanguage).filter(allowedLanguages::contains).findFirst()
+            .orElseGet(() -> allowedLanguages.stream().findFirst().orElseThrow());
+        return LocaleUtil.forLanguageTag(selectedLocale);
+    }
+
     /**
      * From a given request, return the best locale for the user
      *
@@ -66,19 +74,26 @@ public class RequestUtils {
      * @return
      */
     public static Locale getMatchingLocale(ServletWebRequest request, Event event) {
-        var allowedLanguages = event.getContentLanguages().stream().map(ContentLanguage::getLanguage).collect(Collectors.toSet());
-        var l = requireNonNull(request.getNativeRequest(HttpServletRequest.class)).getLocales();
-        List<Locale> locales = l != null ? IteratorUtils.toList(l.asIterator()) : Collections.emptyList();
-        var selectedLocale = locales.stream().map(Locale::getLanguage).filter(allowedLanguages::contains).findFirst()
-            .orElseGet(() -> event.getContentLanguages().stream().findFirst().orElseThrow().getLanguage());
-        return LocaleUtil.forLanguageTag(selectedLocale);
+        var allowedLanguages = event.getContentLanguages().stream().map(ContentLanguage::getLanguage).collect(Collectors.toList());
+        return getMatchingLocale(request, allowedLanguages);
     }
 
     public static boolean isAdmin(Principal principal) {
         if (principal instanceof Authentication) {
-            return ((Authentication) principal).getAuthorities().stream()
-                .map(GrantedAuthority::getAuthority)
-                .anyMatch("ROLE_ADMIN"::equals);
+            return hasRole((Authentication) principal, "ROLE_ADMIN");
+        }
+        return false;
+    }
+
+    private static boolean hasRole(Authentication principal, String role) {
+        return principal.getAuthorities().stream()
+            .map(GrantedAuthority::getAuthority)
+            .anyMatch(role::equals);
+    }
+
+    public static boolean isSystemApiKey(Principal principal) {
+        if (principal instanceof Authentication) {
+            return hasRole((Authentication)principal, "ROLE_SYSTEM_API_CLIENT");
         }
         return false;
     }

@@ -19,15 +19,13 @@ package alfio.manager.system;
 import alfio.config.Initializer;
 import alfio.controller.api.v2.model.AlfioInfo;
 import alfio.controller.api.v2.model.AnalyticsConfiguration;
+import alfio.controller.api.v2.model.WalletConfiguration;
 import alfio.controller.api.v2.user.support.PurchaseContextInfoBuilder;
 import alfio.manager.system.ConfigurationLevels.CategoryLevel;
 import alfio.manager.system.ConfigurationLevels.EventLevel;
 import alfio.manager.system.ConfigurationLevels.OrganizationLevel;
 import alfio.manager.user.UserManager;
-import alfio.model.Configurable;
-import alfio.model.EventAndOrganizationId;
-import alfio.model.PurchaseContext;
-import alfio.model.TicketReservation;
+import alfio.model.*;
 import alfio.model.modification.ConfigurationModification;
 import alfio.model.system.Configuration;
 import alfio.model.system.Configuration.*;
@@ -40,18 +38,21 @@ import alfio.model.user.User;
 import alfio.repository.EventRepository;
 import alfio.repository.system.ConfigurationRepository;
 import com.github.benmanes.caffeine.cache.Cache;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections4.IterableUtils;
+import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.builder.CompareToBuilder;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.servlet.http.HttpSession;
+import java.math.BigInteger;
+import java.security.SecureRandom;
 import java.util.*;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -61,16 +62,16 @@ import java.util.stream.Collectors;
 
 import static alfio.model.system.ConfigurationKeys.*;
 import static alfio.model.system.ConfigurationPathLevel.*;
-import static java.util.stream.Collectors.toList;
 
 @Transactional
-@Log4j2
-@RequiredArgsConstructor
 public class ConfigurationManager {
+
+    private static final Logger log = LoggerFactory.getLogger(ConfigurationManager.class);
 
     private static final Map<ConfigurationKeys.SettingCategory, List<Configuration>> ORGANIZATION_CONFIGURATION = collectConfigurationKeysByCategory(ORGANIZATION);
     private static final Map<ConfigurationKeys.SettingCategory, List<Configuration>> EVENT_CONFIGURATION = collectConfigurationKeysByCategory(ConfigurationPathLevel.EVENT);
     private static final Map<ConfigurationKeys.SettingCategory, List<Configuration>> CATEGORY_CONFIGURATION = collectConfigurationKeysByCategory(ConfigurationPathLevel.TICKET_CATEGORY);
+    private static final String DELETE_ERROR = "User is not owner of the organization. Therefore, delete is not allowed.";
 
     private final ConfigurationRepository configurationRepository;
     private final UserManager userManager;
@@ -78,34 +79,50 @@ public class ConfigurationManager {
     private final ExternalConfiguration externalConfiguration;
     private final Environment environment;
     private final Cache<Set<ConfigurationKeys>, Map<ConfigurationKeys, MaybeConfiguration>> oneMinuteCache;
+    private final SecureRandom secureRandom = new SecureRandom();
+
+    public ConfigurationManager(ConfigurationRepository configurationRepository,
+                                UserManager userManager,
+                                EventRepository eventRepository,
+                                ExternalConfiguration externalConfiguration,
+                                Environment environment,
+                                Cache<Set<ConfigurationKeys>,
+                                Map<ConfigurationKeys, MaybeConfiguration>> oneMinuteCache) {
+        this.configurationRepository = configurationRepository;
+        this.userManager = userManager;
+        this.eventRepository = eventRepository;
+        this.externalConfiguration = externalConfiguration;
+        this.environment = environment;
+        this.oneMinuteCache = oneMinuteCache;
+    }
 
     //TODO: refactor, not the most beautiful code, find a better solution...
     private Optional<Configuration> findByConfigurationPathAndKey(ConfigurationPath path, ConfigurationKeys key) {
         var keyAsString = key.getValue();
         var configList = new ArrayList<>(externalConfiguration.load(keyAsString));
         switch (path.pathLevel()) {
-            case SYSTEM:
+            case SYSTEM -> {
                 configList.addAll(configurationRepository.findByKeyAtSystemLevel(keyAsString));
                 return selectPath(configList);
-            case ORGANIZATION: {
+            }
+            case ORGANIZATION -> {
                 OrganizationConfigurationPath o = (OrganizationConfigurationPath) path;
                 configList.addAll(configurationRepository.findByOrganizationAndKey(o.getId(), key.getValue()));
                 return selectPath(configList);
             }
-            case EVENT: {
+            case EVENT -> {
                 EventConfigurationPath o = (EventConfigurationPath) path;
                 configList.addAll(configurationRepository.findByEventAndKey(o.getOrganizationId(),
                     o.getId(), keyAsString));
                 return selectPath(configList);
             }
-            case TICKET_CATEGORY: {
+            case TICKET_CATEGORY -> {
                 TicketCategoryConfigurationPath o = (TicketCategoryConfigurationPath) path;
                 configList.addAll(configurationRepository.findByTicketCategoryAndKey(o.getOrganizationId(),
                     o.getEventId(), o.getId(), keyAsString));
                 return selectPath(configList);
             }
-            default:
-                throw new IllegalStateException("Can't reach here");
+            default -> throw new IllegalStateException("Can't reach here");
         }
     }
 
@@ -124,19 +141,16 @@ public class ConfigurationManager {
     public void saveConfig(ConfigurationPathKey pathKey, String value) {
         ConfigurationPath path = pathKey.getPath();
         switch (path.pathLevel()) {
-            case SYSTEM:
-                saveSystemConfiguration(pathKey.getKey(), value);
-                break;
-            case ORGANIZATION:
+            case SYSTEM -> saveSystemConfiguration(pathKey.getKey(), value);
+            case ORGANIZATION -> {
                 OrganizationConfigurationPath orgPath = (OrganizationConfigurationPath) path;
                 saveOrganizationConfiguration(orgPath.getId(), pathKey.getKey().name(), value);
-                break;
-            case EVENT:
+            }
+            case EVENT -> {
                 EventConfigurationPath eventPath = (EventConfigurationPath) path;
                 saveEventConfiguration(eventPath.getId(), eventPath.getOrganizationId(), pathKey.getKey().name(), value);
-                break;
-            default:
-                throw new IllegalStateException("can't reach here");
+            }
+            default -> throw new IllegalStateException("can't reach here");
         }
     }
 
@@ -223,7 +237,7 @@ public class ConfigurationManager {
         Optional<Configuration> conf = findByConfigurationPathAndKey(Configuration.system(), key);
         if(key.isBooleanComponentType()) {
             Optional<Boolean> state = getThreeStateValue(value);
-            if(conf.isPresent()) {
+            if(conf.filter(c -> c.getConfigurationPathLevel() != EXTERNAL).isPresent()) {
                 if(state.isPresent()) {
                     configurationRepository.update(key.getValue(), value);
                 } else {
@@ -257,7 +271,7 @@ public class ConfigurationManager {
                 boolean absent = externalConfiguration.getSingle(key.getValue())
                     .or(() -> configurationRepository.findOptionalByKey(key.getValue())).isEmpty();
                 if (absent) {
-                    log.warn("cannot find a value for " + key.getValue());
+                    log.warn("cannot find a value for {}", key.getValue());
                 }
                 return absent;
             });
@@ -279,8 +293,7 @@ public class ConfigurationManager {
         List<SettingCategory> toBeRemoved = PaymentProxy.availableProxies()
             .stream()
             .filter(pp -> paymentMethodsBlacklist.contains(pp.getKey()))
-            .flatMap(pp -> pp.getSettingCategories().stream())
-            .collect(toList());
+            .flatMap(pp -> pp.getSettingCategories().stream()).toList();
 
         if(toBeRemoved.isEmpty()) {
             return result;
@@ -377,8 +390,8 @@ public class ConfigurationManager {
                 ConfigurationKeys.SettingCategory key = e.getKey();
                 Set<Configuration> entries = new TreeSet<>(e.getValue());
                 if(existing.containsKey(key)) {
-                    List<Configuration> configurations = existing.get(key).stream().filter(Predicate.not(Configuration::isInternal)).collect(Collectors.toList());
-                    entries.removeAll(configurations);
+                    List<Configuration> configurations = existing.get(key).stream().filter(Predicate.not(Configuration::isInternal)).toList();
+                    configurations.forEach(entries::remove);
                     entries.addAll(configurations);
                 }
                 return Pair.of(key, new ArrayList<>(entries));
@@ -391,13 +404,11 @@ public class ConfigurationManager {
             return Collections.emptyMap();
         }
         final List<Configuration> existing = configurationRepository.findSystemConfiguration()
-                .stream()
-                .filter(c -> !ConfigurationKeys.fromString(c.getKey()).isInternal())
-                .collect(toList());
+            .stream()
+            .filter(c -> !ConfigurationKeys.fromString(c.getKey()).isInternal()).toList();
         final List<Configuration> missing = Arrays.stream(ConfigurationKeys.visible())
-                .filter(k -> existing.stream().noneMatch(c -> c.getKey().equals(k.getValue())))
-                .map(mapEmptyKeys(ConfigurationPathLevel.SYSTEM))
-                .collect(toList());
+            .filter(k -> existing.stream().noneMatch(c -> c.getKey().equals(k.getValue())))
+            .map(mapEmptyKeys(ConfigurationPathLevel.SYSTEM)).toList();
         List<Configuration> result = new ArrayList<>(existing);
         result.addAll(missing);
         return result.stream().sorted().collect(groupByCategory());
@@ -416,21 +427,21 @@ public class ConfigurationManager {
     }
 
     public void deleteOrganizationLevelByKey(String key, int organizationId, String username) {
-        Validate.isTrue(userManager.isOwnerOfOrganization(userManager.findUserByUsername(username), organizationId), "User is not owner of the organization. Therefore, delete is not allowed.");
+        Validate.isTrue(userManager.isOwnerOfOrganization(userManager.findUserByUsername(username), organizationId), DELETE_ERROR);
         configurationRepository.deleteOrganizationLevelByKey(key, organizationId);
     }
 
     public void deleteEventLevelByKey(String key, int eventId, String username) {
         EventAndOrganizationId event = eventRepository.findEventAndOrganizationIdById(eventId);
         Validate.notNull(event, "Wrong event id");
-        Validate.isTrue(userManager.isOwnerOfOrganization(userManager.findUserByUsername(username), event.getOrganizationId()), "User is not owner of the organization. Therefore, delete is not allowed.");
+        Validate.isTrue(userManager.isOwnerOfOrganization(userManager.findUserByUsername(username), event.getOrganizationId()), DELETE_ERROR);
         configurationRepository.deleteEventLevelByKey(key, eventId);
     }
 
     public void deleteCategoryLevelByKey(String key, int eventId, int categoryId, String username) {
         EventAndOrganizationId event = eventRepository.findEventAndOrganizationIdById(eventId);
         Validate.notNull(event, "Wrong event id");
-        Validate.isTrue(userManager.isOwnerOfOrganization(userManager.findUserByUsername(username), event.getOrganizationId()), "User is not owner of the organization. Therefore, delete is not allowed.");
+        Validate.isTrue(userManager.isOwnerOfOrganization(userManager.findUserByUsername(username), event.getOrganizationId()), DELETE_ERROR);
         configurationRepository.deleteCategoryLevelByKey(key, eventId, categoryId);
     }
 
@@ -483,6 +494,13 @@ public class ConfigurationManager {
     }
 
     // https://github.com/alfio-event/alf.io/issues/573
+
+    public boolean canAttachBillingDocumentToConfirmationEmail(Configurable configurable) {
+        var config = getFor(List.of(ENABLE_ITALY_E_INVOICING, ITALY_E_INVOICING_SEND_PROFORMA), configurable.getConfigurationLevel());
+        return !isItalianEInvoicingEnabled(config)
+            || config.get(ITALY_E_INVOICING_SEND_PROFORMA).getValueAsBooleanOrDefault();
+    }
+
     public boolean canGenerateReceiptOrInvoiceToCustomer(Configurable configurable) {
         return !isItalianEInvoicingEnabled(configurable);
     }
@@ -532,23 +550,21 @@ public class ConfigurationManager {
     public Map<ConfigurationKeys, MaybeConfiguration> getFor(Collection<ConfigurationKeys> keys, ConfigurationLevel configurationLevel) {
         var keysAsString = keys.stream().map(ConfigurationKeys::getValue).collect(Collectors.toSet());
         List<ConfigurationKeyValuePathLevel> found = new ArrayList<>(externalConfiguration.getAll(keysAsString));
-        switch(configurationLevel.getPathLevel()) {
-            case SYSTEM:
-                found.addAll(configurationRepository.findByKeysAtSystemLevel(keysAsString));
-                break;
-            case ORGANIZATION:
-                found.addAll(configurationRepository.findByOrganizationAndKeys(((OrganizationLevel)configurationLevel).organizationId, keysAsString));
-                break;
-            case EVENT:
+        switch (configurationLevel.getPathLevel()) {
+            case SYSTEM -> found.addAll(configurationRepository.findByKeysAtSystemLevel(keysAsString));
+            case ORGANIZATION ->
+                found.addAll(configurationRepository.findByOrganizationAndKeys(((OrganizationLevel) configurationLevel).organizationId, keysAsString));
+            case EVENT -> {
                 var eventLevel = (EventLevel) configurationLevel;
                 found.addAll(configurationRepository.findByEventAndKeys(eventLevel.organizationId, eventLevel.eventId, keysAsString));
-                break;
-            case TICKET_CATEGORY:
+            }
+            case TICKET_CATEGORY -> {
                 var categoryLevel = (CategoryLevel) configurationLevel;
                 found.addAll(configurationRepository.findByTicketCategoryAndKeys(categoryLevel.organizationId, categoryLevel.eventId, categoryLevel.categoryId, keysAsString));
-                break;
-            default:
-                break;
+            }
+            default -> {
+                // ignore EXTERNAL
+            }
         }
         return buildKeyConfigurationMapResult(keys, found);
     }
@@ -579,11 +595,13 @@ public class ConfigurationManager {
                 return categoryIds.stream()
                     .filter(blacklistForCategories::containsKey)
                     .flatMap(id -> Arrays.stream(blacklistForCategories.get(id).split(",")))
+                    .filter(StringUtils::isNotBlank)
                     .map(name -> PaymentProxy.valueOf(name).getPaymentMethod())
-                    .collect(toList());
-            } else if (categoryIds.size() > 0) {
+                    .toList();
+            } else if (!categoryIds.isEmpty()) {
                     return configurationRepository.findByKeyAtCategoryLevel(e.getId(), e.getOrganizationId(), IterableUtils.get(categoryIds, 0), PAYMENT_METHODS_BLACKLIST.name())
-                        .map(v -> Arrays.stream(v.getValue().split(",")).map(name -> PaymentProxy.valueOf(name).getPaymentMethod()).collect(toList()))
+                        .filter(v -> StringUtils.isNotBlank(v.getValue()))
+                        .map(v -> Arrays.stream(v.getValue().split(",")).map(name -> PaymentProxy.valueOf(name).getPaymentMethod()).toList())
                         .orElse(List.of());
             } else {
                 return List.<PaymentMethod>of();
@@ -593,6 +611,17 @@ public class ConfigurationManager {
 
     private static boolean toBeSaved(ConfigurationModification c) {
         return Optional.ofNullable(c.getId()).orElse(-1) > -1 || !StringUtils.isBlank(c.getValue());
+    }
+
+    public List<Integer> getCategoriesWithNoTaxes(List<Integer> categoriesIds) {
+        if (categoriesIds.isEmpty()) {
+            return List.of();
+        }
+        return configurationRepository.getCategoriesWithFlag(categoriesIds, APPLY_TAX_TO_CATEGORY.name(), BooleanUtils.FALSE);
+    }
+
+    public boolean noTaxesFlagDefinedFor(List<TicketCategory> categories) {
+        return !getCategoriesWithNoTaxes(categories.stream().map(TicketCategory::getId).toList()).isEmpty();
     }
 
     public static class MaybeConfiguration {
@@ -687,7 +716,12 @@ public class ConfigurationManager {
             INVOICE_ADDRESS,
             VAT_NR,
             ENABLE_EU_VAT_DIRECTIVE,
-            COUNTRY_OF_BUSINESS);
+            COUNTRY_OF_BUSINESS,
+            ENABLE_REVERSE_CHARGE_IN_PERSON,
+            ENABLE_REVERSE_CHARGE_ONLINE,
+            ANNOUNCEMENT_BANNER_CONTENT,
+            ENABLE_WALLET,
+            ENABLE_PASS);
         var conf = getFor(options, ConfigurationLevel.system());
 
         var analyticsConf = AnalyticsConfiguration.build(conf, session);
@@ -698,7 +732,9 @@ public class ConfigurationManager {
             analyticsConf,
             conf.get(GLOBAL_PRIVACY_POLICY).getValueOrNull(),
             conf.get(GLOBAL_TERMS).getValueOrNull(),
-            PurchaseContextInfoBuilder.invoicingInfo(this, conf));
+            PurchaseContextInfoBuilder.invoicingInfo(this, conf),
+            StringUtils.trimToNull(conf.get(ANNOUNCEMENT_BANNER_CONTENT).getValueOrNull()),
+            new WalletConfiguration(conf.get(ENABLE_WALLET).getValueAsBooleanOrDefault(), conf.get(ENABLE_PASS).getValueAsBooleanOrDefault()));
     }
 
     public Map<ConfigurationKeys, ConfigurationManager.MaybeConfiguration> getPublicOpenIdConfiguration() {
@@ -714,5 +750,26 @@ public class ConfigurationManager {
         var configurationLevel = purchaseContext.event().map(ConfigurationLevel::event)
             .orElseGet(() -> ConfigurationLevel.organization(purchaseContext.getOrganizationId()));
         return StringUtils.removeEnd(getFor(BASE_URL, configurationLevel).getRequiredValue(), "/");
+    }
+
+    public String retrieveSystemApiKey(boolean rotate) {
+        Optional<Configuration> existing = configurationRepository.findOptionalByKey(SYSTEM_API_KEY.name());
+        String apiKeyValue;
+        if(existing.isPresent() && rotate) {
+            apiKeyValue = generateApiKey();
+            configurationRepository.update(SYSTEM_API_KEY.name(), apiKeyValue);
+        } else if(existing.isPresent()) {
+            apiKeyValue = existing.get().getValue();
+        } else {
+            apiKeyValue = generateApiKey();
+            configurationRepository.insert(SYSTEM_API_KEY.name(), apiKeyValue, SYSTEM_API_KEY.getDescription());
+        }
+        return apiKeyValue;
+    }
+
+    private String generateApiKey() {
+        var bytes = new byte[48];
+        secureRandom.nextBytes(bytes);
+        return new BigInteger(1, bytes).toString(36);
     }
 }

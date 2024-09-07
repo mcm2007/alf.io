@@ -19,15 +19,19 @@ package alfio.model.poll;
 import alfio.model.support.Array;
 import alfio.model.support.JSONData;
 import ch.digitalfondue.npjt.ConstructorAnnotationRowMapper.Column;
-import lombok.Getter;
-import lombok.ToString;
+import org.apache.commons.lang3.builder.ToStringBuilder;
 
 import java.util.List;
 import java.util.Map;
 
-@Getter
-@ToString
-public class Poll {
+public record Poll(@Column("id") long id,
+                   @Column("status") PollStatus status,
+                   @Column("title") @JSONData Map<String, String> title,
+                   @Column("description") @JSONData Map<String, String> description,
+                   @Column("allowed_tags") @Array List<String> allowedTags,
+                   @Column("poll_order") int order,
+                   @Column("event_id_fk") int eventId,
+                   @Column("organization_id_fk") int organizationId) {
 
 
     public enum PollStatus {
@@ -36,33 +40,17 @@ public class Poll {
         CLOSED
     }
 
-    private final long id;
-    private final PollStatus status;
-    private final Map<String, String> title;
-    private final Map<String, String> description;
-    private final List<String> allowedTags;
-    private final int order;
-    private final int eventId;
-    private final int organizationId;
-
-    public Poll(@Column("id") long id,
-                @Column("status") PollStatus status,
-                @Column("title") @JSONData Map<String, String> title,
-                @Column("description") @JSONData Map<String, String> description,
-                @Column("allowed_tags") @Array List<String> allowedTags,
-                @Column("poll_order") int order,
-                @Column("event_id_fk") int eventId,
-                @Column("organization_id_fk") int organizationId) {
-
-        this.id = id;
-        this.status = status;
-        this.title = title;
-        this.description = description;
-        this.allowedTags = allowedTags;
-        this.order = order;
-        this.eventId = eventId;
-        this.organizationId = organizationId;
+    @Override
+    public String toString() {
+        return new ToStringBuilder(this)
+            .append("id", id)
+            .append("status", status)
+            .append("title", title)
+            .append("description", description)
+            .append("allowedTags", allowedTags)
+            .append("order", order)
+            .append("eventId", eventId)
+            .append("organizationId", organizationId)
+            .toString();
     }
-
-
 }

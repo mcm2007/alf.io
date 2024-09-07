@@ -30,7 +30,12 @@ public interface ApiPurchaseContext {
     InvoicingConfiguration getInvoicingConfiguration();
     EventWithAdditionalInfo.AssignmentConfiguration getAssignmentConfiguration();
     AnalyticsConfiguration getAnalyticsConfiguration();
+
+    OfflinePaymentConfiguration getOfflinePaymentConfiguration();
     EventWithAdditionalInfo.CaptchaConfiguration getCaptchaConfiguration();
+
+    EmbeddingConfiguration getEmbeddingConfiguration();
+
     boolean isVatIncluded();
     boolean isFree();
     String getCurrency();

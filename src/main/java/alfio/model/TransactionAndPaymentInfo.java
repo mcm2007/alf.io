@@ -19,15 +19,10 @@ package alfio.model;
 
 import alfio.model.transaction.PaymentProxy;
 import alfio.model.transaction.Transaction;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
 
-@Getter
-@AllArgsConstructor
-public class TransactionAndPaymentInfo {
-    private final PaymentProxy paymentMethod;
-    private final Transaction transaction;
-    private final PaymentInformation paymentInformation;
+public record TransactionAndPaymentInfo(PaymentProxy paymentMethod,
+                                        Transaction transaction,
+                                        PaymentInformation paymentInformation) {
 
     public boolean isSupportRefund() {
         return paymentMethod != null && paymentMethod.isSupportRefund();

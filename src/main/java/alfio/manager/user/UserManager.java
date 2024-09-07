@@ -16,7 +16,7 @@
  */
 package alfio.manager.user;
 
-import alfio.model.TicketReservationAdditionalInfo;
+import alfio.config.authentication.support.APITokenAuthentication;
 import alfio.model.modification.OrganizationModification;
 import alfio.model.result.ValidationResult;
 import alfio.model.user.*;
@@ -29,11 +29,13 @@ import alfio.repository.user.join.UserOrganizationRepository;
 import alfio.util.PasswordGenerator;
 import alfio.util.RequestUtils;
 import ch.digitalfondue.npjt.AffectedRowCountAndKey;
-import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.session.FindByIndexNameSessionRepository;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.Assert;
@@ -46,13 +48,15 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static alfio.config.authentication.support.AuthenticationConstants.SYSTEM_API_CLIENT;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 
 @Component
 @Transactional
-@RequiredArgsConstructor
 public class UserManager {
+
+    private static final Logger log = LoggerFactory.getLogger(UserManager.class);
 
     public static final String ADMIN_USERNAME = "admin";
     private static final Pattern SLUG_VALIDATOR = Pattern.compile("^[A-Za-z-_0-9]+$");
@@ -63,10 +67,29 @@ public class UserManager {
     private final PasswordEncoder passwordEncoder;
     private final InvoiceSequencesRepository invoiceSequencesRepository;
 
+    private final FindByIndexNameSessionRepository<?> sessionsByPrincipalFinder;
+
+    public UserManager(AuthorityRepository authorityRepository,
+                       OrganizationRepository organizationRepository,
+                       UserOrganizationRepository userOrganizationRepository,
+                       UserRepository userRepository,
+                       PasswordEncoder passwordEncoder,
+                       InvoiceSequencesRepository invoiceSequencesRepository,
+                       FindByIndexNameSessionRepository<?> sessionsByPrincipalFinder) {
+        this.authorityRepository = authorityRepository;
+        this.organizationRepository = organizationRepository;
+        this.userOrganizationRepository = userOrganizationRepository;
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.invoiceSequencesRepository = invoiceSequencesRepository;
+        this.sessionsByPrincipalFinder = sessionsByPrincipalFinder;
+    }
+
     private List<Authority> getUserAuthorities(User user) {
         return authorityRepository.findGrantedAuthorities(user.getUsername());
     }
 
+    @Transactional(readOnly = true)
     public List<UserWithOrganizations> findAllUsers(String username) {
         List<Organization> organizations = findUserOrganizations(username);
         Predicate<Collection<?>> isNotEmpty = ks -> !ks.isEmpty();
@@ -75,49 +98,61 @@ public class UserManager {
             .flatMap(org -> {
                 Map<Integer, List<UserOrganization>> usersAndOrganizations = userOrganizationRepository.findByOrganizationIdsOrderByUserId(organizations.stream().map(Organization::getId).collect(toList()))
                     .stream()
-                    .collect(Collectors.groupingBy(UserOrganization::getUserId));
+                    .collect(Collectors.groupingBy(UserOrganization::userId));
                 return Optional.of(usersAndOrganizations.keySet())
                     .filter(isNotEmpty)
                     .map(ks -> userRepository.findByIds(ks)
                         .stream()
                         .map(u -> {
                             List<UserOrganization> userOrganizations = usersAndOrganizations.get(u.getId());
-                            List<Organization> filteredOrganizations = organizations.stream().filter(o -> userOrganizations.stream().anyMatch(uo -> uo.getOrganizationId() == o.getId())).collect(toList());
+                            List<Organization> filteredOrganizations = organizations.stream().filter(o -> userOrganizations.stream().anyMatch(uo -> uo.organizationId() == o.getId())).collect(toList());
                             List<Role> roles = authorityRepository.findRoles(u.getUsername()).stream().map(Role::fromRoleName).collect(toList());
                             return new UserWithOrganizations(u, filteredOrganizations, roles);
                         }).collect(toList()));
             }).orElseGet(Collections::emptyList);
     }
 
+    @Transactional(readOnly = true)
     public List<User> findAllEnabledUsers(String username) {
         return findUserOrganizations(username)
                 .stream()
                 .flatMap(o -> userOrganizationRepository.findByOrganizationId(o.getId()).stream())
-                .map(uo -> userRepository.findById(uo.getUserId()))
+                .map(uo -> userRepository.findById(uo.userId()))
                 .filter(User::isEnabled)
                 .collect(toList());
     }
 
+    @Transactional(readOnly = true)
     public List<User> findAllApiKeysFor(int organizationId) {
         return userRepository.findAllApiKeysForOrganization(organizationId);
     }
 
+    @Transactional(readOnly = true)
     public User findUserByUsername(String username) {
         return userRepository.findEnabledByUsername(username).orElseThrow(IllegalArgumentException::new);
     }
 
+    @Transactional(readOnly = true)
     public Optional<User> findOptionalEnabledUserByUsername(String username) {
         return userRepository.findEnabledByUsername(username);
     }
 
+    @Transactional(readOnly = true)
     public boolean usernameExists(String username) {
         return userRepository.findIdByUserName(username).isPresent();
     }
 
-    public User findUser(int id) {
+    @Transactional(readOnly = true)
+    public User findUser(int id, Principal principal) {
+        checkAccessToUserId(principal, id);
+        return internalFindUser(id);
+    }
+
+    private User internalFindUser(int id) {
         return userRepository.findById(id);
     }
 
+    @Transactional(readOnly = true)
     public Collection<Role> getAvailableRoles(String username) {
         User user = findUserByUsername(username);
         return isAdmin(user) || isOwner(user) ? EnumSet.of(Role.OWNER, Role.OPERATOR, Role.SUPERVISOR, Role.SPONSOR, Role.API_CONSUMER) : Collections.emptySet();
@@ -128,34 +163,45 @@ public class UserManager {
      * @param user
      * @return user role
      */
+    @Transactional(readOnly = true)
     public Role getUserRole(User user) {
         return getUserAuthorities(user).stream().map(Authority::getRole).sorted().findFirst().orElse(Role.OPERATOR);
     }
 
+    @Transactional(readOnly = true)
     public List<Organization> findUserOrganizations(String username) {
         return organizationRepository.findAllForUser(username);
     }
 
+    @Transactional(readOnly = true)
     public Organization findOrganizationById(int id, String username) {
-        return findUserOrganizations(username)
-                .stream()
-                .filter(o -> o.getId() == id)
-                .findFirst()
-                .orElseThrow(IllegalArgumentException::new);
+        return findOptionalOrganizationById(id, username).orElseThrow(IllegalArgumentException::new);
     }
 
+    @Transactional(readOnly = true)
+    public Optional<Organization> findOptionalOrganizationById(int id, String username) {
+        return findUserOrganizations(username)
+            .stream()
+            .filter(o -> o.getId() == id)
+            .findFirst();
+    }
+
+    @Transactional(readOnly = true)
     public boolean isAdmin(User user) {
         return checkRole(user, Collections.singleton(Role.ADMIN));
     }
 
+    @Transactional(readOnly = true)
     public boolean isOwner(User user) {
         return checkRole(user, EnumSet.of(Role.ADMIN, Role.OWNER, Role.API_CONSUMER));
     }
 
+    @Transactional(readOnly = true)
     public boolean isOwnerOfOrganization(User user, int organizationId) {
-        return isAdmin(user) || (isOwner(user) && userOrganizationRepository.findByUserId(user.getId()).stream().anyMatch(uo -> uo.getOrganizationId() == organizationId));
+        return isAdmin(user) || (isOwner(user) && userOrganizationRepository.findByUserId(user.getId()).stream().anyMatch(uo -> uo.organizationId() == organizationId));
     }
 
+    @Transactional(readOnly = true)
     public boolean isOwnerOfOrganization(String username, int organizationId) {
         return userRepository.findByUsername(username)
             .filter(user -> isOwnerOfOrganization(user, organizationId))
@@ -167,16 +213,23 @@ public class UserManager {
         return authorityRepository.checkRole(user.getUsername(), roleNames);
     }
 
-    public int createOrganization(OrganizationModification om) {
+    public int createOrganization(OrganizationModification om, Principal principal) {
+        //
+        checkIsAdmin(principal);
+        //
         var affectedRowNumAndKey = organizationRepository.create(om.getName(), om.getDescription(), om.getEmail(), om.getExternalId(), om.getSlug());
         int orgId = affectedRowNumAndKey.getKey();
-        invoiceSequencesRepository.initFor(orgId);
+        Validate.isTrue(invoiceSequencesRepository.initFor(orgId) == 2);
         return orgId;
     }
 
     public void updateOrganization(OrganizationModification om, Principal principal) {
-        boolean isAdmin = RequestUtils.isAdmin(principal);
-        var currentOrg = organizationRepository.getById(requireNonNull(om.getId()));
+        //
+        int orgId = requireNonNull(om.getId());
+        checkAccessToOrganizationId(principal, orgId);
+        //
+        boolean isAdmin = RequestUtils.isAdmin(principal) || RequestUtils.isSystemApiKey(principal);
+        var currentOrg = organizationRepository.getById(orgId);
         organizationRepository.update(om.getId(),
             om.getName(),
             om.getDescription(),
@@ -185,6 +238,7 @@ public class UserManager {
             isAdmin ? om.getSlug() : currentOrg.getSlug());
     }
 
+    @Transactional(readOnly = true)
     public ValidationResult validateOrganizationSlug(OrganizationModification om, Principal principal) {
         if(!RequestUtils.isAdmin(principal)) {
             return ValidationResult.failed(new ValidationResult.ErrorDescriptor("slug", "Cannot update Organizer URL."));
@@ -199,6 +253,7 @@ public class UserManager {
         return ValidationResult.success();
     }
 
+    @Transactional(readOnly = true)
     public ValidationResult validateOrganization(OrganizationModification om, Principal principal) {
         if(om.getId() == null && organizationRepository.findByName(om.getName()).isPresent()) {
             return ValidationResult.failed(new ValidationResult.ErrorDescriptor("name", "There is already another organization with the same name."));
@@ -215,7 +270,11 @@ public class UserManager {
         return ValidationResult.success();
     }
 
-    public void editUser(int id, int organizationId, String username, String firstName, String lastName, String emailAddress, String description, Role role, String currentUsername) {
+    public void editUser(int id, int organizationId, String username, String firstName, String lastName, String emailAddress, String description, Role role, Principal principal) {
+        //
+        checkAccessToUserIdAndNewOrganization(principal, id, organizationId);
+        //
+        String currentUsername = principal.getName();
         boolean admin = ADMIN_USERNAME.equals(username) && Role.ADMIN == role;
         if(!admin) {
             int userOrganizationResult = userOrganizationRepository.updateUserOrganization(id, organizationId);
@@ -230,16 +289,17 @@ public class UserManager {
         }
     }
 
-    public void updateUserContactInfo(int id, String firstName, String lastName, String emailAddress) {
+    public void updateCurrentUserContactInfo(String firstName, String lastName, String emailAddress, Principal principal) {
+        var id = userRepository.findIdByUserName(principal.getName()).orElseThrow();
         userRepository.updateContactInfo(id, firstName, lastName, emailAddress);
     }
 
-    public UserWithPassword insertUser(int organizationId, String username, String firstName, String lastName, String emailAddress, Role role, User.Type userType) {
-        return insertUser(organizationId, username, firstName, lastName, emailAddress, role, userType, null, null);
+    public UserWithPassword insertUser(int organizationId, String username, String firstName, String lastName, String emailAddress, Role role, User.Type userType, Principal principal) {
+        return insertUser(organizationId, username, firstName, lastName, emailAddress, role, userType, null, null, principal);
     }
 
 
-    public UserWithPassword insertUser(int organizationId, String username, String firstName, String lastName, String emailAddress, Role role, User.Type userType, ZonedDateTime validTo, String description) {
+    public UserWithPassword insertUser(int organizationId, String username, String firstName, String lastName, String emailAddress, Role role, User.Type userType, ZonedDateTime validTo, String description, Principal principal) {
         if (userType == User.Type.API_KEY) {
             username = UUID.randomUUID().toString();
             firstName = "apikey";
@@ -248,17 +308,20 @@ public class UserManager {
         }
 
         String userPassword = PasswordGenerator.generateRandomPassword();
-        return insertUser(organizationId, username, firstName, lastName, emailAddress, role, userType, userPassword, validTo, description);
+        return insertUser(organizationId, username, firstName, lastName, emailAddress, role, userType, userPassword, validTo, description, principal);
     }
 
-    public void bulkInsertApiKeys(int organizationId, Role role, List<String> descriptions) {
+    public void bulkInsertApiKeys(int organizationId, Role role, List<String> descriptions, Principal principal) {
         for (String description : descriptions) {
-            insertUser(organizationId, null, null, null, null, role, User.Type.API_KEY, null, description);
+            insertUser(organizationId, null, null, null, null, role, User.Type.API_KEY, null, description, principal);
         }
     }
 
 
-    public UserWithPassword insertUser(int organizationId, String username, String firstName, String lastName, String emailAddress, Role role, User.Type userType, String userPassword, ZonedDateTime validTo, String description) {
+    public UserWithPassword insertUser(int organizationId, String username, String firstName, String lastName, String emailAddress, Role role, User.Type userType, String userPassword, ZonedDateTime validTo, String description, Principal principal) {
+        //
+        checkAccessToOrganizationId(principal, organizationId);
+        //
         Organization organization = organizationRepository.getById(organizationId);
         AffectedRowCountAndKey<Integer> result = userRepository.create(username, passwordEncoder.encode(userPassword), firstName, lastName, emailAddress, true, userType, validTo, description);
         userOrganizationRepository.create(result.getKey(), organization.getId());
@@ -267,34 +330,62 @@ public class UserManager {
     }
 
 
-    public UserWithPassword resetPassword(int userId) {
-        User user = findUser(userId);
+    public UserWithPassword resetPassword(int userId, Principal principal) {
+        //
+        checkAccessToUserId(principal, userId);
+        //
+        User user = internalFindUser(userId);
         String password = PasswordGenerator.generateRandomPassword();
         Validate.isTrue(userRepository.resetPassword(userId, passwordEncoder.encode(password)) == 1, "error during password reset");
+
+        if (!Objects.requireNonNull(principal).getName().equals(user.getUsername())) {
+            invalidateSessionsForUser(user.getUsername());
+        }
+
         return new UserWithPassword(user, password, UUID.randomUUID().toString());
     }
 
 
-    public void updatePassword(String username, String newPassword) {
+    public void updateCurrentUserPassword(String newPassword, Principal principal) {
+        var username = principal.getName();
         User user = userRepository.findByUsername(username).orElseThrow(IllegalStateException::new);
         Validate.isTrue(PasswordGenerator.isValid(newPassword), "invalid password");
         Validate.isTrue(userRepository.resetPassword(user.getId(), passwordEncoder.encode(newPassword)) == 1, "error during password update");
     }
 
 
-    public void deleteUser(int userId, String currentUsername) {
+    public void deleteUser(int userId, Principal principal) {
+        //
+        checkAccessToUserId(principal, userId);
+        //
+        var currentUsername = principal.getName();
         User currentUser = userRepository.findEnabledByUsername(currentUsername).orElseThrow(IllegalArgumentException::new);
         Assert.isTrue(userId != currentUser.getId(), "sorry but you cannot delete your own account.");
+        var userToDelete = userRepository.findById(userId);
         userRepository.deleteUserAndReferences(userId);
+        invalidateSessionsForUser(userToDelete.getUsername());
     }
 
-    public void enable(int userId, String currentUsername, boolean status) {
+    private void invalidateSessionsForUser(String username) {
+        var sessionsToInvalidate = sessionsByPrincipalFinder.findByPrincipalName(username).keySet();
+        sessionsToInvalidate.forEach(sessionsByPrincipalFinder::deleteById);
+    }
+
+    public void enable(int userId, boolean status, Principal principal) {
+        //
+        checkAccessToUserId(principal, userId);
+        //
+        var currentUsername = principal.getName();
         User currentUser = userRepository.findEnabledByUsername(currentUsername).orElseThrow(IllegalArgumentException::new);
         Assert.isTrue(userId != currentUser.getId(), "sorry but you cannot commit suicide");
-
         userRepository.toggleEnabled(userId, status);
+        if (!status) { // disable user
+            var userToDisable = userRepository.findById(userId);
+            invalidateSessionsForUser(userToDisable.getUsername());
+        }
     }
 
+    @Transactional(readOnly = true)
     public ValidationResult validateUser(Integer id, String username, String firstName, String lastName, String emailAddress) {
 
         Optional<User> existing = Optional.ofNullable(id).flatMap(userRepository::findOptionalById);
@@ -308,6 +399,7 @@ public class UserManager {
             .collect(toList()));
     }
 
+    @Transactional(readOnly = true)
     public ValidationResult validateNewPassword(String username, String oldPassword, String newPassword, String newPasswordConfirm) {
         return userRepository.findByUsername(username)
             .map(u -> {
@@ -327,4 +419,81 @@ public class UserManager {
             .orElseGet(ValidationResult::failed);
     }
 
+    public Integer createPublicUserIfNotExists(String username, String email, String firstName, String lastName) {
+        int result = userRepository.createPublicUserIfNotExists(username,
+            passwordEncoder.encode(PasswordGenerator.generateRandomPassword()),
+            firstName,
+            lastName,
+            email,
+            true);
+        if (result == 1) {
+            log.info("Created public user");
+        } else {
+            log.info("User was not created because already existed");
+        }
+        return userRepository.findIdByUserName(username).orElse(null);
+    }
+
+
+    private void checkIsAdmin(Principal principal) {
+        if (principal == null) {
+            return;
+        }
+        if (isSystemApiUser(principal)) {
+            log.trace("Allowing call for System API Key");
+            return;
+        }
+        if (isAdmin(findUserByUsername(principal.getName()))) {
+            return;
+        }
+        log.warn("User {} is not an admin", principal.getName());
+        throw new IllegalArgumentException("User " + principal.getName() + " is not an admin");
+    }
+
+    private void checkAccessToUserId(Principal principal, int userId) {
+        if (principal == null) {
+            return;
+        }
+        var currentUser = findUserByUsername(principal.getName());
+        if (isAdmin(currentUser)) {
+            return;
+        }
+        var targetUser = internalFindUser(userId);
+        var targetUserOrgs = findUserOrganizations(targetUser.getUsername());
+        Assert.state(!targetUser.getUsername().equals(ADMIN_USERNAME) && !isAdmin(targetUser), "Targeted user cannot be admin");
+        Assert.isTrue(targetUserOrgs.size() == 1, "Targeted user can only be in one organization");
+        for (var org : targetUserOrgs) {
+            if (isOwnerOfOrganization(currentUser, org.getId())) {
+                return;
+            }
+        }
+        log.warn("User {} does not have access to userId {}", principal.getName(), userId);
+        throw new IllegalStateException("User " + principal.getName() + " does not have access to userId " + userId);
+    }
+
+    private void checkAccessToUserIdAndNewOrganization(Principal principal, int userId, int newOrganization) {
+        checkAccessToUserId(principal, userId);
+        checkAccessToOrganizationId(principal, newOrganization);
+    }
+
+    private void checkAccessToOrganizationId(Principal principal, int organizationId) {
+        if (principal == null) {
+            return;
+        }
+        if (isSystemApiUser(principal)) {
+            log.trace("Allowing access to Organization " + organizationId + " to System API Key");
+            return;
+        }
+        if (isOwnerOfOrganization(principal.getName(), organizationId)) {
+            return;
+        }
+        log.warn("User {} don't have access to organizationId {}", principal.getName(), organizationId);
+        throw new IllegalArgumentException("User " + principal.getName() + " don't have access to organizationId " + organizationId);
+    }
+
+    private boolean isSystemApiUser(Principal principal) {
+        return principal instanceof APITokenAuthentication
+            && ((APITokenAuthentication)principal).getAuthorities().stream()
+            .allMatch(authority -> authority.getAuthority().equals("ROLE_" + SYSTEM_API_CLIENT));
+    }
 }

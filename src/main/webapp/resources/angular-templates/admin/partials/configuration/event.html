@@ -105,6 +105,9 @@
                         <setting obj="eventConf.mail.enableHtmlEmails" data-display-delete-if-needed="true" data-delete-handler="eventConf.delete(config)"></setting>
                     </div>
                 </div>
+                <div>
+                    <setting obj="eventConf.mail.mailFooter" data-display-delete-if-needed="true" data-delete-handler="eventConf.delete(config)"></setting>
+                </div>
                 <div data-ng-repeat="setting in eventConf.mail.settings" data-ng-if="!eventConf.mail.type">
                     <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="eventConf.delete(config)"></setting>
                 </div>
@@ -121,7 +124,7 @@
             </div>
             <div class="panel panel-default">
                 <div class="panel-heading">
-                    <div class="panel-title"><i class="fa fa-eur"></i> EU-Specific invoice settings</div>
+                    <div class="panel-title"><i class="fa fa-eur"></i> VAT settings for B2B customers</div>
                 </div>
                 <div class="panel-body">
                     <div data-ng-repeat="setting in eventConf.invoiceEu.settings">
@@ -214,6 +217,18 @@
                         <div data-ng-repeat="setting in eventConf.paymentOffline.revolutSettings">
                             <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="eventConf.delete(config)"></setting>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="page-header" id="SUBSCRIPTIONS">
+                <h2>Subscriptions</h2>
+            </div>
+            <div>
+                <div data-ng-repeat="setting in eventConf.subscriptions.settings">
+                    <setting data-obj="setting" data-display-delete-if-needed="true" data-delete-handler="eventConf.delete(config)"></setting>
+                    <div data-ng-if="setting.key === 'GENERATE_TICKETS_FOR_SUBSCRIPTIONS' && setting.id > -1 && setting.value === 'true'">
+                        <button class="btn btn-default" type="button" ng-click="eventConf.generateTicketsForSubscribers()">Force generation</button>
                     </div>
                 </div>
             </div>

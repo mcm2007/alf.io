@@ -31,6 +31,7 @@ import alfio.repository.PromoCodeDiscountRepository;
 import alfio.repository.SpecialPriceRepository;
 import alfio.repository.TicketCategoryRepository;
 import alfio.repository.user.OrganizationRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import org.apache.commons.lang3.time.DateUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.AfterEach;
@@ -60,10 +61,10 @@ import static alfio.test.util.IntegrationTestUtil.initEvent;
 import static alfio.test.util.TestUtil.clockProvider;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest()
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-public class TicketReservationManagerConcurrentTest {
+class TicketReservationManagerConcurrentTest {
 
     private static final String ACCESS_CODE = "MY_ACCESS_CODE";
 
@@ -114,21 +115,21 @@ public class TicketReservationManagerConcurrentTest {
             firstCategoryId = ticketCategoryRepository.findAllTicketCategories(eventId).get(0).getId();
 
             specialPriceTokenGenerator.generatePendingCodesForCategory(firstCategoryId);
-            promoCodeDiscountRepository.addPromoCode(ACCESS_CODE, eventId, event.getOrganizationId(), ZonedDateTime.now(clockProvider().getClock()), ZonedDateTime.now(clockProvider().getClock()).plusDays(1), 0, PromoCodeDiscount.DiscountType.NONE, null, 100, null, null, PromoCodeDiscount.CodeType.ACCESS, firstCategoryId);
+            promoCodeDiscountRepository.addPromoCode(ACCESS_CODE, eventId, event.getOrganizationId(), ZonedDateTime.now(clockProvider().getClock()), ZonedDateTime.now(clockProvider().getClock()).plusDays(1), 0, PromoCodeDiscount.DiscountType.NONE, null, 100, null, null, PromoCodeDiscount.CodeType.ACCESS, firstCategoryId, null);
             promoCodeDiscount = promoCodeDiscountRepository.findPublicPromoCodeInEventOrOrganization(eventId, ACCESS_CODE).orElseThrow();
             return null;
         });
     }
 
     @Test
-    public void testConcurrentAccessCode() throws InterruptedException {
+    void testConcurrentAccessCode() throws InterruptedException {
         var pool = Executors.newFixedThreadPool(AVAILABLE_SEATS);
         var callableList = new ArrayList<Callable<List<SpecialPrice>>>();
         for (int i = 0; i < AVAILABLE_SEATS; i++) {
             callableList.add(() -> {
                 return transactionTemplate.execute(tx -> {
                     TicketReservationModification tr = new TicketReservationModification();
-                    tr.setAmount(1);
+                    tr.setQuantity(1);
                     tr.setTicketCategoryId(firstCategoryId);
                     TicketReservationWithOptionalCodeModification mod = new TicketReservationWithOptionalCodeModification(tr, Optional.empty());
                     return ticketReservationManager.reserveTokensForAccessCode(mod, promoCodeDiscount);
@@ -153,9 +154,9 @@ public class TicketReservationManagerConcurrentTest {
     }
 
     @Test
-    public void testExpirationDuringReservation() {
+    void testExpirationDuringReservation() {
         TicketReservationModification tr = new TicketReservationModification();
-        tr.setAmount(1);
+        tr.setQuantity(1);
         tr.setTicketCategoryId(firstCategoryId);
         TicketReservationWithOptionalCodeModification mod = new TicketReservationWithOptionalCodeModification(tr, Optional.empty());
 

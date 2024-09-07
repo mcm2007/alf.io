@@ -20,6 +20,7 @@ import alfio.controller.form.ReservationForm;
 import alfio.manager.support.response.ValidatedResponse;
 import alfio.model.Event;
 import alfio.model.PromoCodeDiscount;
+import alfio.model.PromoCodeUsageResult;
 import alfio.model.SpecialPrice;
 import alfio.model.modification.TicketReservationModification;
 import alfio.model.result.ValidationResult;
@@ -30,7 +31,7 @@ import alfio.repository.TicketCategoryRepository;
 import alfio.util.ClockProvider;
 import alfio.util.ErrorsCode;
 import alfio.util.RequestUtils;
-import lombok.AllArgsConstructor;
+import alfio.util.ReservationUtil;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.lang3.tuple.Triple;
@@ -43,6 +44,7 @@ import java.security.Principal;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.function.BiConsumer;
@@ -51,7 +53,6 @@ import java.util.function.Function;
 import static alfio.model.PromoCodeDiscount.categoriesOrNull;
 
 @Component
-@AllArgsConstructor
 public class PromoCodeRequestManager {
 
     private final SpecialPriceRepository specialPriceRepository;
@@ -61,6 +62,22 @@ public class PromoCodeRequestManager {
     private final EventRepository eventRepository;
     private final TicketReservationManager ticketReservationManager;
     private final ClockProvider clockProvider;
+
+    public PromoCodeRequestManager(SpecialPriceRepository specialPriceRepository,
+                                   PromoCodeDiscountRepository promoCodeRepository,
+                                   TicketCategoryRepository ticketCategoryRepository,
+                                   EventManager eventManager,
+                                   EventRepository eventRepository,
+                                   TicketReservationManager ticketReservationManager,
+                                   ClockProvider clockProvider) {
+        this.specialPriceRepository = specialPriceRepository;
+        this.promoCodeRepository = promoCodeRepository;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.eventManager = eventManager;
+        this.eventRepository = eventRepository;
+        this.ticketReservationManager = ticketReservationManager;
+        this.clockProvider = clockProvider;
+    }
 
     enum PromoCodeType {
         SPECIAL_PRICE, PROMO_CODE_DISCOUNT, TICKET_CATEGORY_CODE, NOT_FOUND
@@ -135,7 +152,7 @@ public class PromoCodeRequestManager {
         ZonedDateTime now = ZonedDateTime.now(clockProvider.withZone(eventZoneId));
         Optional<String> maybeSpecialCode = Optional.ofNullable(StringUtils.trimToNull(promoCode));
         Optional<SpecialPrice> specialCode = maybeSpecialCode.flatMap(specialPriceRepository::getByCode);
-        Optional<PromoCodeDiscount> promotionCodeDiscount = maybeSpecialCode.flatMap((trimmedCode) -> promoCodeRepository.findPublicPromoCodeInEventOrOrganization(event.getId(), trimmedCode));
+        Optional<PromoCodeDiscount> promotionCodeDiscount = maybeSpecialCode.flatMap(trimmedCode -> promoCodeRepository.findPublicPromoCodeInEventOrOrganization(event.getId(), trimmedCode));
 
         var result = Pair.of(specialCode, promotionCodeDiscount);
 
@@ -151,15 +168,16 @@ public class PromoCodeRequestManager {
                 return errorResponse;
             }
 
-        } else if (promotionCodeDiscount.isPresent() && !promotionCodeDiscount.get().isCurrentlyValid(eventZoneId, now)) {
-            return errorResponse;
-        } else if (promotionCodeDiscount.isPresent() && isDiscountCodeUsageExceeded(promotionCodeDiscount.get())){
-            return errorResponse;
-        } else if(promotionCodeDiscount.isEmpty()) {
+        } else if(promotionCodeDiscount.isPresent()) {
+            var pcd = promotionCodeDiscount.get();
+            if (!pcd.isCurrentlyValid(eventZoneId, now)
+                || isDiscountCodeUsageExceeded(pcd)
+                || (pcd.hasCurrencyCode() && !pcd.getCurrencyCode().equals(event.getCurrency()))) {
+                return errorResponse;
+            }
+        } else {
             return errorResponse;
         }
-        //
-
 
         return new ValidatedResponse<>(ValidationResult.success(), result);
     }
@@ -193,7 +211,7 @@ public class PromoCodeRequestManager {
         ReservationForm form = new ReservationForm();
         form.setPromoCode(promoCode);
         TicketReservationModification reservation = new TicketReservationModification();
-        reservation.setAmount(1);
+        reservation.setQuantity(1);
         reservation.setTicketCategoryId(ticketCategoryId);
         form.setReservation(Collections.singletonList(reservation));
         var bindingRes = new BeanPropertyBindingResult(form, "reservationForm");
@@ -206,8 +224,30 @@ public class PromoCodeRequestManager {
                                                      Locale locale,
                                                      Optional<String> promoCodeDiscount,
                                                      Principal principal) {
-        return reservation.validate(bindingResult, ticketReservationManager, eventManager, promoCodeDiscount.orElse(null), event)
+        return ReservationUtil.validateCreateRequest(reservation, bindingResult, ticketReservationManager, eventManager, promoCodeDiscount.orElse(null), event)
             .flatMap(selected -> ticketReservationManager.createTicketReservation(event, selected.getLeft(), selected.getRight(), promoCodeDiscount, locale, bindingResult, principal));
+    }
+
+    public Optional<PromoCodeDiscount> findById(int id) {
+        return promoCodeRepository.findOptionalById(id);
+    }
+
+    public void disablePromoCode(int promoCodeId) {
+        promoCodeRepository.updateEventPromoCodeEnd(promoCodeId, ZonedDateTime.now(clockProvider.getClock()));
+    }
+
+    public int countUsage(int promoCodeId) {
+        Optional<PromoCodeDiscount> code = findById(promoCodeId);
+        if(code.isEmpty()) {
+            return 0;
+        }
+        return promoCodeRepository.countConfirmedPromoCode(promoCodeId, categoriesOrNull(code.get()), null, categoriesOrNull(code.get()) != null ? "X" : null);
+    }
+
+    public List<PromoCodeUsageResult> retrieveDetailedUsage(int promoCodeId, Integer eventId) {
+        return findById(promoCodeId)
+            .map(pc -> promoCodeRepository.findDetailedUsage(pc.getPromoCode(), eventId))
+            .orElse(List.of());
     }
 
 }

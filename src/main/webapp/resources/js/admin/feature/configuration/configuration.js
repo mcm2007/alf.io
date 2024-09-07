@@ -14,25 +14,25 @@
                 })
                 .state('configuration.system', {
                     url: '/system',
-                    templateUrl: '/resources/angular-templates/admin/partials/configuration/system.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/configuration/system.html',
                     controller: 'SystemConfigurationController',
                     controllerAs: 'systemConf'
                 })
                 .state('configuration.organization', {
                     url: '/organization/:organizationId',
-                    templateUrl: '/resources/angular-templates/admin/partials/configuration/organization.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/configuration/organization.html',
                     controller: 'OrganizationConfigurationController',
                     controllerAs: 'organizationConf'
                 })
                 .state('configuration.event', {
                     url: '/organization/:organizationId/event/:eventId',
-                    templateUrl: '/resources/angular-templates/admin/partials/configuration/event.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/configuration/event.html',
                     controller: 'EventConfigurationController',
                     controllerAs: 'eventConf'
                 })
                 .state('events.single.configuration', {
                     url: '/configuration',
-                    templateUrl: '/resources/angular-templates/admin/partials/configuration/event.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/configuration/event.html',
                     controller: 'EventConfigurationController',
                     controllerAs: 'eventConf'
                 });
@@ -55,7 +55,7 @@
             }
         }).component('regenerateInvoices', {
             controller: ['$scope', 'ConfigurationService', 'NotificationHandler', RegenerateInvoicesController],
-            templateUrl: '../resources/js/admin/feature/configuration/regenerate-invoices.html',
+            templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/configuration/regenerate-invoices.html',
             bindings: {
                 event: '<'
             }
@@ -100,9 +100,15 @@
                 return $http.get('/admin/api/configuration/events/'+eventId+'/load').error(HttpErrorHandler.handle)
             },
             loadSingleConfigForEvent: function(eventId, key) {
+                if (!window.USER_IS_OWNER) {
+                    return $q.reject('not authorized');
+                }
                 return $http.get('/admin/api/configuration/events/'+eventId+'/single/'+key).error(HttpErrorHandler.handle)
             },
             loadSingleConfigForOrganization: function(organizationId, key) {
+                if (!window.USER_IS_OWNER) {
+                    return $q.reject('not authorized');
+                }
                 return $http.get('/admin/api/configuration/organizations/'+organizationId+'/single/'+key).error(HttpErrorHandler.handle)
             },
             loadInstanceSettings: function() {
@@ -159,7 +165,8 @@
                         cc: _.find(original['MAIL'], function(e) {return e.configurationKey === 'MAIL_SYSTEM_NOTIFICATION_CC';}),
                         mailReplyTo: _.find(original['MAIL'], function(e) {return e.configurationKey === 'MAIL_REPLY_TO';}),
                         mailAttemptsCount: _.find(original['MAIL'], function(e) {return e.configurationKey === 'MAIL_ATTEMPTS_COUNT';}),
-                        enableHtmlEmails: _.find(original['MAIL'], function(e) {return e.configurationKey === 'ENABLE_HTML_EMAILS';})
+                        enableHtmlEmails: _.find(original['MAIL'], function(e) {return e.configurationKey === 'ENABLE_HTML_EMAILS';}),
+                        mailFooter: _.find(original['MAIL'], function(e) {return e.configurationKey === 'MAIL_FOOTER';})
                     };
                 }
 
@@ -225,6 +232,14 @@
             },
             loadFirstInvoiceDate: function(event) {
                 return $http.get('/admin/api/configuration/event/'+event.id+'/invoice-first-date').error(HttpErrorHandler.handle);
+            },
+            generateTicketsForSubscribers: function(organizationId, eventId) {
+                return $http.put('/admin/api/configuration/generate-tickets-for-subscriptions', {}, {
+                    params: {
+                        eventId,
+                        organizationId
+                    }
+                })
             }
         };
         return service;
@@ -308,6 +323,14 @@
             });
         };
 
+        systemConf.generateTicketsForSubscribers = function() {
+            ConfigurationService.generateTicketsForSubscribers().then(function() {
+                NotificationHandler.showSuccess("Generation has been scheduled. Will run in 1 minute");
+            }, function() {
+                NotificationHandler.showError("Error while scheduling generation");
+            })
+        };
+
         systemConf.updateLocales = function() {
             updateLocales(systemConf);
         };
@@ -373,6 +396,14 @@
 
         organizationConf.delete = function(config) {
             return ConfigurationService.removeOrganizationConfig(config, organizationConf.organizationId);
+        };
+
+        organizationConf.generateTicketsForSubscribers = function() {
+            ConfigurationService.generateTicketsForSubscribers(organizationConf.organizationId).then(function() {
+                NotificationHandler.showSuccess("Generation has been scheduled. Will run in 1 minute");
+            }, function() {
+                NotificationHandler.showError("Error while scheduling generation");
+            })
         };
 
         organizationConf.deleteExtensionSetting = function(config) {
@@ -507,6 +538,14 @@
             return ConfigurationService.removeEventConfig(config, eventConf.eventId);
         };
 
+        eventConf.generateTicketsForSubscribers = function() {
+            ConfigurationService.generateTicketsForSubscribers(eventConf.organizationId, eventConf.eventId).then(function() {
+                NotificationHandler.showSuccess("Generation has been scheduled. Will run in 1 minute");
+            }, function() {
+                NotificationHandler.showError("Error while scheduling generation");
+            })
+        };
+
         eventConf.deleteExtensionSetting = function(config) {
             return ExtensionService.deleteEventSettingValue(eventConf.organizationId, eventConf.eventId, config);
         };
@@ -621,12 +660,13 @@
             scope: {
                 event: '=',
                 category: '=',
-                closeModal: '&'
+                closeModal: '&',
+                onSave: '&'
             },
             bindToController: true,
             controller: ['ConfigurationService', '$rootScope', 'GroupService', '$q', CategoryConfigurationController],
             controllerAs: 'categoryConf',
-            templateUrl: '/resources/angular-templates/admin/partials/configuration/category.html'
+            templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/configuration/category.html'
         };
     }
 
@@ -661,14 +701,15 @@
                 return;
             }
             categoryConf.loading = true;
+            var onSaveComplete = categoryConf.onSave ? categoryConf.onSave : load;
 
             ConfigurationService.updateCategoryConfig(categoryConf.category.id, categoryConf.event.id, categoryConf.settings).then(function() {
                 if(categoryConf.group) {
                     GroupService.linkTo(categoryConf.group).then(function() {
-                        load();
+                        onSaveComplete();
                     });
                 } else {
-                    load();
+                    onSaveComplete();
                 }
             }, function(e) {
                 alert(e.data);
@@ -693,7 +734,7 @@
             link: function() {
                 var m = $uibModal.open({
                     size:'lg',
-                    templateUrl:'/resources/angular-templates/admin/partials/configuration/basic-settings.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/configuration/basic-settings.html',
                     backdrop: 'static',
                     controllerAs: 'ctrl',
                     controller: function($scope) {
@@ -782,7 +823,7 @@
                 };
                 ctrl.paymentMethods = paymentMethods;
             }],
-            templateUrl: '../resources/js/admin/feature/configuration/payment-method-blacklist.html'
+            templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/configuration/payment-method-blacklist.html'
         }
     }
 })();

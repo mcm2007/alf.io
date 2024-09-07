@@ -22,41 +22,60 @@ import alfio.repository.FileUploadRepository;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
+import com.github.benmanes.caffeine.cache.RemovalListener;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
+import org.imgscalr.Scalr;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.*;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.*;
 
 @Component
 @Transactional
-@Log4j2
-@RequiredArgsConstructor
 public class FileUploadManager {
 
+    static final int IMAGE_THUMB_MAX_WIDTH_PX = 300;
+    static final int IMAGE_THUMB_MAX_HEIGHT_PX = 200;
+    private static final Logger log = LoggerFactory.getLogger(FileUploadManager.class);
     /**
      * Maximum allowed file size is 200kb
      */
-    static final int MAXIMUM_ALLOWED_SIZE = 1024 * 200;
+    private static final int MAXIMUM_ALLOWED_SIZE = 1024 * 200;
+    private static final MimeType IMAGE_TYPE = MimeType.valueOf("image/*");
     private final FileUploadRepository repository;
     private final Cache<String, File> cache = Caffeine.newBuilder()
         .maximumSize(20)
         .expireAfterWrite(Duration.ofMinutes(20))
-        .removalListener((String key, File value, RemovalCause cause) -> {
-            if(value != null) {
-                boolean result = value.delete();
-                log.trace("deleted {}: {}", key, result);
-            }
-        })
+        .removalListener(removalListener())
         .build();
+
+    public FileUploadManager(FileUploadRepository repository) {
+        this.repository = repository;
+    }
+
+    private static RemovalListener<String, File> removalListener() {
+        return (String key, File value, RemovalCause cause) -> {
+            if (value != null) {
+                try {
+                    Files.delete(value.toPath());
+                    log.trace("deleted {}", key);
+                } catch(Exception ex) {
+                    log.trace("Error while deleting file", ex);
+                }
+            }
+        };
+    }
 
     public Optional<FileBlobMetadata> findMetadata(String id) {
         return repository.findById(id);
@@ -79,20 +98,49 @@ public class FileUploadManager {
         }
     }
 
-
     public String insertFile(UploadBase64FileModification file) {
-        Validate.exclusiveBetween(1, MAXIMUM_ALLOWED_SIZE, file.getFile().length);
-        String digest = DigestUtils.sha256Hex(file.getFile());
-        if (Integer.valueOf(1).equals(repository.isPresent(digest))) {
-            return digest;
+        final var mimeType = MimeTypeUtils.parseMimeType(file.getType());
+        var upload = resizeIfNeeded(file, mimeType);
+        Validate.exclusiveBetween(1, MAXIMUM_ALLOWED_SIZE, upload.getFile().length);
+        String digest = DigestUtils.sha256Hex(upload.getFile());
+        if (Integer.valueOf(0).equals(repository.isPresent(digest))) {
+            repository.upload(upload, digest, getAttributes(upload));
         }
-        repository.upload(file, digest, getAttributes(file));
         return digest;
     }
 
     public void cleanupUnreferencedBlobFiles(Date date) {
         int deleted = repository.cleanupUnreferencedBlobFiles(date);
         log.debug("removed {} unused file_blob", deleted);
+    }
+
+    /**
+     * @author <a href="https://github.com/emassip">Etienne M.</a>
+     */
+    private UploadBase64FileModification resizeIfNeeded(UploadBase64FileModification upload, MimeType mimeType) {
+        if (!mimeType.isCompatibleWith(IMAGE_TYPE)) {
+            // not an image, nothing to do here.
+            return upload;
+        }
+        try {
+            BufferedImage image = ImageIO.read(new ByteArrayInputStream(upload.getFile()));
+            // resize only if the image is bigger than target size on either side
+            if (image.getWidth() > IMAGE_THUMB_MAX_WIDTH_PX || image.getHeight() > IMAGE_THUMB_MAX_HEIGHT_PX) {
+                UploadBase64FileModification resized = new UploadBase64FileModification();
+                BufferedImage thumbImg = Scalr.resize(image, Scalr.Method.QUALITY, Scalr.Mode.AUTOMATIC, IMAGE_THUMB_MAX_WIDTH_PX, IMAGE_THUMB_MAX_HEIGHT_PX, Scalr.OP_ANTIALIAS);
+                try (final var baos = new ByteArrayOutputStream()) {
+                    ImageIO.write(thumbImg, mimeType.getSubtype(), baos);
+                    resized.setFile(baos.toByteArray());
+                }
+                resized.setAttributes(upload.getAttributes());
+                resized.setName(upload.getName());
+                resized.setType(upload.getType());
+                return resized;
+            }
+            return upload;
+        } catch (IOException ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     private Map<String, String> getAttributes(UploadBase64FileModification file) {

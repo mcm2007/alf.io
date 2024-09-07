@@ -16,15 +16,15 @@
  */
 package alfio.manager;
 
-import alfio.repository.EventRepository;
-import lombok.AllArgsConstructor;
-import org.apache.commons.lang3.RandomStringUtils;
+import alfio.repository.EventAdminRepository;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.commons.text.RandomStringGenerator;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.Optional;
@@ -33,21 +33,29 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 @Component
-@AllArgsConstructor
 @Transactional(readOnly = true)
 public class EventNameManager {
 
     private static final Pattern NUMBER_MATCHER = Pattern.compile("^\\d+$");
     private static final String SPACES_AND_PUNCTUATION = "[\\s\\p{Punct}]";
     private static final String FIND_EVIL_CHARACTERS = "[^\\sA-Z\\-a-z0-9]";
-    private final EventRepository eventRepository;
+    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final RandomStringGenerator RANDOM_STRING_GENERATOR = new RandomStringGenerator.Builder()
+        .withinRange(new char[] {'a', 'z'}, new char[] {'A', 'Z'} , new char[] { '0', '9'})
+        .usingRandom(RANDOM::nextInt)
+        .build();
+    private final EventAdminRepository eventAdminRepository;
+
+    public EventNameManager(EventAdminRepository eventAdminRepository) {
+        this.eventAdminRepository = eventAdminRepository;
+    }
 
     /**
      * Generates and returns a short name based on the given display name.<br>
      * The generated short name will be returned only if it was not already used.<br>
      * The input parameter will be clean from "evil" characters such as punctuation and accents
      *
-     * 1) if the {@code displayName} is a one-word name, then no further calculation will be done and it will be returned as it is, to lower case
+     * 1) if the {@code displayName} is a one-word name, then no further calculation will be done, and it will be returned as it is, to lower case
      * 2) the {@code displayName} will be split by word and transformed to lower case. If the total length is less than 15, then it will be joined using "-" and returned
      * 3) the first letter of each word will be taken, excluding numbers
      * 4) a random code will be returned
@@ -71,7 +79,7 @@ public class EventNameManager {
 
     private String generateRandomName() {
         return IntStream.range(0, 5)
-                .mapToObj(i -> RandomStringUtils.randomAlphanumeric(15))
+                .mapToObj(i -> RANDOM_STRING_GENERATOR.generate(15))
                 .filter(this::isUnique)
                 .limit(1)
                 .findFirst()
@@ -81,7 +89,7 @@ public class EventNameManager {
     private Optional<String> getCroppedName(String cleanDisplayName) {
         String candidate = Arrays.stream(cleanDisplayName.split(SPACES_AND_PUNCTUATION))
                 .map(w -> Pair.of(NUMBER_MATCHER.matcher(w).matches(), w))
-                .map(p -> p.getKey() ? p.getValue() : StringUtils.left(p.getValue(), 1))
+                .map(p -> Boolean.TRUE.equals(p.getKey()) ? p.getValue() : StringUtils.left(p.getValue(), 1))
                 .collect(Collectors.joining());
         if(isUnique(candidate)) {
             return Optional.of(candidate);
@@ -100,6 +108,6 @@ public class EventNameManager {
     }
 
     public boolean isUnique(String shortName) {
-        return eventRepository.countByShortName(shortName) == 0;
+        return !eventAdminRepository.existsBySlug(shortName);
     }
 }

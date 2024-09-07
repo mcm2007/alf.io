@@ -19,10 +19,10 @@ package alfio.model;
 import alfio.model.metadata.AlfioMetadata;
 import alfio.model.modification.StatisticsContainer;
 import alfio.model.modification.TicketWithStatistic;
+import alfio.model.system.Configuration;
 import alfio.util.ClockProvider;
 import alfio.util.MonetaryUtil;
 import com.fasterxml.jackson.annotation.JsonIgnore;
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.experimental.Delegate;
 
@@ -33,7 +33,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-@AllArgsConstructor
 @Getter
 public class TicketCategoryWithAdditionalInfo implements StatisticsContainer, PriceContainer {
 
@@ -56,6 +55,20 @@ public class TicketCategoryWithAdditionalInfo implements StatisticsContainer, Pr
     //TODO: to remove it
     @Deprecated
     private final List<TicketWithStatistic> tickets = Collections.emptyList();
+
+    public TicketCategoryWithAdditionalInfo(Event event,
+                                            TicketCategory ticketCategory,
+                                            TicketCategoryStatisticView ticketCategoryStatisticView,
+                                            Map<String, String> description,
+                                            List<SpecialPrice> tokenStatus,
+                                            AlfioMetadata metadata) {
+        this.event = event;
+        this.ticketCategory = ticketCategory;
+        this.ticketCategoryStatisticView = ticketCategoryStatisticView;
+        this.description = description;
+        this.tokenStatus = tokenStatus;
+        this.metadata = metadata;
+    }
 
     @JsonIgnore
     public Event getEvent() {
@@ -169,5 +182,9 @@ public class TicketCategoryWithAdditionalInfo implements StatisticsContainer, Pr
     @Override
     public VatStatus getVatStatus() {
         return event.getVatStatus();
+    }
+
+    public List<Configuration> getConfiguration() {
+        return ticketCategoryStatisticView.getConfiguration();
     }
 }

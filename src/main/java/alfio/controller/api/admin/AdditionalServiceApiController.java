@@ -19,6 +19,7 @@ package alfio.controller.api.admin;
 import alfio.manager.AdditionalServiceManager;
 import alfio.manager.EventManager;
 import alfio.model.AdditionalService;
+import alfio.model.AdditionalServiceItem;
 import alfio.model.Event;
 import alfio.model.PriceContainer;
 import alfio.model.modification.EventModification;
@@ -27,9 +28,9 @@ import alfio.repository.EventRepository;
 import alfio.util.ExportUtils;
 import alfio.util.MonetaryUtil;
 import alfio.util.Validator;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.Validate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
@@ -52,13 +53,21 @@ import static java.util.Objects.requireNonNullElse;
 
 @RestController
 @RequestMapping("/admin/api")
-@RequiredArgsConstructor
-@Log4j2
 public class AdditionalServiceApiController {
+
+    private static final Logger log = LoggerFactory.getLogger(AdditionalServiceApiController.class);
 
     private final EventManager eventManager;
     private final EventRepository eventRepository;
     private final AdditionalServiceManager additionalServiceManager;
+
+    public AdditionalServiceApiController(EventManager eventManager,
+                                          EventRepository eventRepository,
+                                          AdditionalServiceManager additionalServiceManager) {
+        this.eventManager = eventManager;
+        this.eventRepository = eventRepository;
+        this.additionalServiceManager = additionalServiceManager;
+    }
 
 
     @ExceptionHandler({IllegalArgumentException.class})
@@ -87,7 +96,7 @@ public class AdditionalServiceApiController {
     }
 
     @GetMapping("/event/{eventId}/additional-services/count")
-    public Map<Integer, Integer> countUse(@PathVariable("eventId") int eventId) {
+    public Map<Integer, Map<AdditionalServiceItem.AdditionalServiceItemStatus, Integer>> countUse(@PathVariable("eventId") int eventId) {
         return additionalServiceManager.countUsageForEvent(eventId);
     }
 
@@ -155,6 +164,7 @@ public class AdditionalServiceApiController {
             "Name",
             "Creation",
             "Last Update",
+            "Status",
             "Reservation ID",
             "Reservation First name",
             "Reservation Last name",
@@ -171,6 +181,7 @@ public class AdditionalServiceApiController {
                 item.getAdditionalServiceTitle(),
                 item.getUtcCreation().withZoneSameInstant(event.getZoneId()).format(formatter),
                 requireNonNullElse(item.getUtcLastModified(), item.getUtcCreation()).withZoneSameInstant(event.getZoneId()).format(formatter),
+                item.getAdditionalServiceItemStatus().name(),
                 item.getTicketsReservationUuid(),
                 item.getFirstName(),
                 item.getLastName(),

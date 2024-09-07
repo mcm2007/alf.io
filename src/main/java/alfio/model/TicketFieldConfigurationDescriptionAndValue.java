@@ -18,21 +18,20 @@ package alfio.model;
 
 import alfio.util.Json;
 import com.fasterxml.jackson.core.type.TypeReference;
-import lombok.AllArgsConstructor;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import lombok.experimental.Delegate;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Triple;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-@AllArgsConstructor
 public class TicketFieldConfigurationDescriptionAndValue {
 
     @Delegate
@@ -41,6 +40,24 @@ public class TicketFieldConfigurationDescriptionAndValue {
     private final TicketFieldDescription ticketFieldDescription;
     private final int count;
     private final String value;
+
+    private static final List<String> TEXT_FIELD_TYPES = List.of(
+        "text",
+        "tel",
+        "textarea",
+        "vat:eu"
+    );
+    private static final Pattern CHECKBOX_VALUES_PATTERN = Pattern.compile("\"(.*?)\",?");
+
+    public TicketFieldConfigurationDescriptionAndValue(TicketFieldConfiguration ticketFieldConfiguration,
+                                                       TicketFieldDescription ticketFieldDescription,
+                                                       int count,
+                                                       String value) {
+        this.ticketFieldConfiguration = ticketFieldConfiguration;
+        this.ticketFieldDescription = ticketFieldDescription;
+        this.count = count;
+        this.value = value;
+    }
 
     public String getTranslatedValue() {
         if(StringUtils.isBlank(value)) {
@@ -71,16 +88,36 @@ public class TicketFieldConfigurationDescriptionAndValue {
 
     }
 
+    private boolean isText() {
+        return TEXT_FIELD_TYPES.contains(getType());
+    }
+
     public String getValueDescription() {
-        if(isSelectField()) {
-            return getTranslatedRestrictedValue().stream()
-                .filter(t -> StringUtils.equals(t.getLeft(), value))
-                .map(Triple::getMiddle)
-                .findFirst()
-                .orElse("");
-        } else {
+        if(isText()) {
             return value;
+        } else if(isCheckboxField()) {
+            var matches = new ArrayList<String>();
+            var matcher = CHECKBOX_VALUES_PATTERN.matcher(value);
+            while(matcher.find()) {
+                matches.add(matcher.group(1));
+            }
+            var restrictedValues = getTranslatedRestrictedValue();
+            return matches.stream()
+                .map(v -> findValueDescription(restrictedValues, v))
+                .filter(StringUtils::isNotBlank)
+                .collect(Collectors.joining(", "));
+        } else {
+            return findValueDescription(getTranslatedRestrictedValue(), value);
         }
+    }
+
+    private String findValueDescription(List<Triple<String, String, Boolean>> translateRestrictedValues,
+                                        String value) {
+        return translateRestrictedValues.stream()
+            .filter(t -> StringUtils.equals(t.getLeft(), value))
+            .map(Triple::getMiddle)
+            .findFirst()
+            .orElse("");
     }
 
     public String getValue() {
@@ -101,13 +138,20 @@ public class TicketFieldConfigurationDescriptionAndValue {
             || !ticketFieldConfiguration.getDisabledValues().contains(value);
     }
 
-    @RequiredArgsConstructor
+
     @Getter
     public static class TicketFieldValue {
         private final int fieldIndex;
         private final int fieldCounter;
         private final String fieldValue;
         private final Boolean editable;
+
+        public TicketFieldValue(int fieldIndex, int fieldCounter, String fieldValue, Boolean editable) {
+            this.fieldIndex = fieldIndex;
+            this.fieldCounter = fieldCounter;
+            this.fieldValue = fieldValue;
+            this.editable = editable;
+        }
     }
 
 }

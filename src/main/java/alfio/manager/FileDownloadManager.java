@@ -17,21 +17,22 @@
 package alfio.manager;
 
 import alfio.model.modification.UploadBase64FileModification;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
-import lombok.extern.log4j.Log4j2;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
 
-@Log4j2
 public class FileDownloadManager {
+
+    private static final Logger log = LoggerFactory.getLogger(FileDownloadManager.class);
 
     private final HttpClient httpClient;
 
@@ -41,7 +42,7 @@ public class FileDownloadManager {
 
     public DownloadedFile downloadFile(String url) {
         HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(url)).GET().build();
-        HttpResponse<byte[]> response = null;
+        HttpResponse<byte[]> response;
         try {
             response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofByteArray());
         } catch (IOException exception) {
@@ -55,7 +56,7 @@ public class FileDownloadManager {
         if(callSuccessful(response)) {
             String[] parts = Pattern.compile("/").split(url);
             String name = parts[parts.length - 1];
-            if(Objects.nonNull(response.body()) && response.body().length <= FileUploadManager.MAXIMUM_ALLOWED_SIZE) {
+            if(Objects.nonNull(response.body())) {
                 return new DownloadedFile(
                         response.body(),
                         name,
@@ -65,7 +66,7 @@ public class FileDownloadManager {
                 return null;
             }
         } else {
-            log.warn("downloading file not successful:" + response);
+            log.warn("downloading file not successful: {}", response);
             return null;
         }
     }
@@ -78,12 +79,8 @@ public class FileDownloadManager {
         return response.statusCode() >= 200 && response.statusCode() < 300;
     }
 
-    @Getter
-    @AllArgsConstructor
-    public static class DownloadedFile {
-        private byte[] file;
-        private String name;
-        private String type;
+
+    public record DownloadedFile(byte[] file, String name, String type) {
 
         public UploadBase64FileModification toUploadBase64FileModification() {
             UploadBase64FileModification uf = new UploadBase64FileModification();
@@ -91,6 +88,33 @@ public class FileDownloadManager {
             uf.setName(name);
             uf.setType(type);
             return uf;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DownloadedFile df)) {
+                return false;
+            }
+            return Arrays.equals(file, df.file) && name.equals(df.name) && type.equals(df.type);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = Objects.hash(name, type);
+            result = 31 * result + Arrays.hashCode(file);
+            return result;
+        }
+
+        @Override
+        public String toString() {
+            return "DownloadedFile{" +
+                "file=" + Arrays.toString(file) +
+                ", name='" + name + '\'' +
+                ", type='" + type + '\'' +
+                '}';
         }
     }
 

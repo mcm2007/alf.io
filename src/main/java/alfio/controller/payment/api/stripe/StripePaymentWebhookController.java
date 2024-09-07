@@ -19,8 +19,7 @@ package alfio.controller.payment.api.stripe;
 import alfio.manager.TicketReservationManager;
 import alfio.model.transaction.PaymentProxy;
 import alfio.util.RequestUtils;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -30,27 +29,39 @@ import org.springframework.web.bind.annotation.RestController;
 import javax.servlet.http.HttpServletRequest;
 import java.util.Map;
 
+import static alfio.util.HttpUtils.APPLICATION_JSON_UTF8;
+
 @RestController
-@Log4j2
-@AllArgsConstructor
 public class StripePaymentWebhookController {
 
     private final TicketReservationManager ticketReservationManager;
 
+    public StripePaymentWebhookController(TicketReservationManager ticketReservationManager) {
+        this.ticketReservationManager = ticketReservationManager;
+    }
+
     @PostMapping("/api/payment/webhook/stripe/payment")
     public ResponseEntity<String> receivePaymentConfirmation(@RequestHeader(value = "Stripe-Signature") String stripeSignature,
                                                            HttpServletRequest request) {
+        var httpHeaders = new HttpHeaders();
+        httpHeaders.add(HttpHeaders.CONTENT_TYPE, APPLICATION_JSON_UTF8);
         return RequestUtils.readRequest(request)
             .map(content -> {
                 var result = ticketReservationManager.processTransactionWebhook(content, stripeSignature, PaymentProxy.STRIPE, Map.of());
                 if(result.isSuccessful()) {
-                    return ResponseEntity.ok("OK");
+                    return ResponseEntity.status(HttpStatus.OK)
+                        .headers(httpHeaders)
+                        .body("OK");
                 } else if(result.isError()) {
-                    return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(result.getReason());
+                    return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .headers(httpHeaders)
+                        .body(result.getReason());
                 }
-                return ResponseEntity.ok(result.getReason());
+                return ResponseEntity.status(HttpStatus.OK)
+                    .headers(httpHeaders)
+                    .body(result.getReason());
             })
-            .orElseGet(() -> ResponseEntity.badRequest().body("NOK"));
+            .orElseGet(() -> ResponseEntity.badRequest().headers(httpHeaders).body("Malformed request."));
 
     }
 }

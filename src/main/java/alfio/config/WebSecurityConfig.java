@@ -26,7 +26,6 @@ import alfio.repository.user.OrganizationRepository;
 import alfio.repository.user.UserRepository;
 import alfio.repository.user.join.UserOrganizationRepository;
 import alfio.util.Json;
-import lombok.extern.log4j.Log4j2;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -39,9 +38,10 @@ import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 
 import java.net.http.HttpClient;
 
+import static alfio.config.Initializer.PROFILE_OPENID;
+
 @Configuration(proxyBeanMethods = false)
 @EnableWebSecurity
-@Log4j2
 public class WebSecurityConfig {
 
     public static final String CSRF_PARAM_NAME = "_csrf";
@@ -56,7 +56,7 @@ public class WebSecurityConfig {
     }
 
     @Bean
-    @Profile("openid")
+    @Profile(PROFILE_OPENID)
     public AdminOpenIdAuthenticationManager adminOpenIdAuthenticationManager(Environment environment,
                                                                              HttpClient httpClient,
                                                                              ConfigurationManager configurationManager,

@@ -32,7 +32,6 @@ import alfio.model.user.PublicUserProfile;
 import alfio.model.user.User;
 import alfio.repository.TicketFieldRepository;
 import alfio.repository.user.UserRepository;
-import lombok.AllArgsConstructor;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
 import org.springframework.security.core.Authentication;
@@ -49,12 +48,21 @@ import static java.util.stream.Collectors.toMap;
 
 @Component
 @Transactional
-@AllArgsConstructor
 public class PublicUserManager {
     private final UserRepository userRepository;
     private final ExtensionManager extensionManager;
     private final UserManager userManager;
     private final TicketFieldRepository ticketFieldRepository;
+
+    public PublicUserManager(UserRepository userRepository,
+                             ExtensionManager extensionManager,
+                             UserManager userManager,
+                             TicketFieldRepository ticketFieldRepository) {
+        this.userRepository = userRepository;
+        this.extensionManager = extensionManager;
+        this.userManager = userManager;
+        this.ticketFieldRepository = ticketFieldRepository;
+    }
 
     public boolean deleteUserProfile(OpenIdAlfioAuthentication authentication) {
         return userManager.findOptionalEnabledUserByUsername(authentication.getName())
@@ -117,11 +125,8 @@ public class PublicUserManager {
         var userLanguage = form.getUserLanguage();
         var filteredItems = extensionManager.filterAdditionalInfoToSave(purchaseContext, form.getAdditional(), existingProfile);
         final Map<String, AdditionalInfoItem> filteredItemsByKey;
-        if(filteredItems != null) {
-            filteredItemsByKey = filteredItems.stream().collect(toMap(AdditionalInfoItem::getKey, Function.identity()));
-        } else {
-            filteredItemsByKey = null;
-        }
+        filteredItemsByKey = filteredItems.map(additionalInfoItems -> additionalInfoItems.stream().collect(toMap(AdditionalInfoItem::getKey, Function.identity())))
+            .orElse(null);
         var labels = ticketFieldRepository.findDescriptions(event.getId(), userLanguage).stream()
             .filter(f -> fieldsById.containsKey(f.getTicketFieldConfigurationId()))
             .map(f -> Map.entry(fieldsById.get(f.getTicketFieldConfigurationId()).getName(), f))

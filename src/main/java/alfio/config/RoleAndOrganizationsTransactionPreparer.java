@@ -17,7 +17,8 @@
 package alfio.config;
 
 import alfio.config.authentication.support.OpenIdAlfioAuthentication;
-import lombok.extern.log4j.Log4j2;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -34,8 +35,14 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
 
-@Log4j2
+import static alfio.config.authentication.support.AuthenticationConstants.ADMIN;
+import static alfio.config.authentication.support.AuthenticationConstants.SYSTEM_API_CLIENT;
+
 class RoleAndOrganizationsTransactionPreparer {
+
+    private static final Logger log = LoggerFactory.getLogger(RoleAndOrganizationsTransactionPreparer.class);
+
+    private RoleAndOrganizationsTransactionPreparer() {}
 
     private static final OrRequestMatcher IS_PUBLIC_URLS = new OrRequestMatcher(
         new AntPathRequestMatcher("/resources/**"),
@@ -82,7 +89,7 @@ class RoleAndOrganizationsTransactionPreparer {
             return SecurityContextHolder.getContext().getAuthentication()
                 .getAuthorities().stream()
                 .map(GrantedAuthority::getAuthority)
-                .anyMatch("ROLE_ADMIN"::equals);
+                .anyMatch(authority -> authority.equals("ROLE_" + SYSTEM_API_CLIENT) || authority.equals("ROLE_" + ADMIN));
         }
         return false;
     }

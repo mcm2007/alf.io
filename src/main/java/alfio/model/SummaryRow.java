@@ -16,28 +16,32 @@
  */
 package alfio.model;
 
-import lombok.Data;
-
-@Data
-public class SummaryRow {
-    private final String name;
-    private final String price;
-    private final String priceBeforeVat;
-    private final int amount;
-    private final String subTotal;
-    private final String subTotalBeforeVat;
-    private final int originalSubTotal;
-    private final SummaryType type;
-
+public record SummaryRow(String name,
+                         String price,
+                         String priceBeforeVat,
+                         int amount,
+                         String subTotal,
+                         String subTotalBeforeVat,
+                         int originalSubTotal,
+                         SummaryType type,
+                         String taxPercentage,
+                         PriceContainer.VatStatus vatStatus) {
     public enum SummaryType {
-        TICKET, SUBSCRIPTION, PROMOTION_CODE, DYNAMIC_DISCOUNT, ADDITIONAL_SERVICE, APPLIED_SUBSCRIPTION
+        TICKET, SUBSCRIPTION, PROMOTION_CODE, DYNAMIC_DISCOUNT, ADDITIONAL_SERVICE, APPLIED_SUBSCRIPTION, TAX_DETAIL
     }
 
     public String getDescriptionForPayment() {
-        return amount + " x " + name;
+        if (name != null) {
+            return amount + " x " + name;
+        }
+        return "";
     }
 
     public boolean isDiscount() {
         return type == SummaryType.PROMOTION_CODE || type == SummaryType.DYNAMIC_DISCOUNT;
+    }
+
+    public boolean getTaxDetail() {
+        return type == SummaryType.TAX_DETAIL;
     }
 }

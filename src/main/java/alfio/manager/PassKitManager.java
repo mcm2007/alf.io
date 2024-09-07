@@ -17,6 +17,7 @@
 package alfio.manager;
 
 import alfio.manager.system.ConfigurationManager;
+import alfio.manager.system.Mailer;
 import alfio.model.*;
 import alfio.model.system.ConfigurationKeys;
 import alfio.model.user.Organization;
@@ -24,6 +25,7 @@ import alfio.repository.*;
 import alfio.repository.user.OrganizationRepository;
 import alfio.util.Json;
 import alfio.util.LocaleUtil;
+import alfio.util.MustacheCustomTag;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.ryantenney.passkit4j.Pass;
@@ -33,10 +35,12 @@ import com.ryantenney.passkit4j.model.*;
 import com.ryantenney.passkit4j.sign.PassSigner;
 import com.ryantenney.passkit4j.sign.PassSignerImpl;
 import com.ryantenney.passkit4j.sign.PassSigningException;
-import lombok.AllArgsConstructor;
 import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.BooleanUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.imgscalr.Scalr;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
@@ -52,9 +56,9 @@ import java.util.stream.Collectors;
 import static alfio.model.system.ConfigurationKeys.*;
 
 @Component
-@AllArgsConstructor
-@Log4j2
 public class PassKitManager {
+
+    private static final Logger log = LoggerFactory.getLogger(PassKitManager.class);
 
     private static final String APPLE_PASS = "ApplePass";
     private final Cache<String, Optional<byte[]>> passKitLogoCache = Caffeine.newBuilder()
@@ -68,7 +72,22 @@ public class PassKitManager {
     private final EventDescriptionRepository eventDescriptionRepository;
     private final TicketCategoryRepository ticketCategoryRepository;
     private final TicketRepository ticketRepository;
-    private final TicketReservationRepository ticketReservationRepository;
+
+    public PassKitManager(EventRepository eventRepository,
+                          OrganizationRepository organizationRepository,
+                          ConfigurationManager configurationManager,
+                          FileUploadManager fileUploadManager,
+                          EventDescriptionRepository eventDescriptionRepository,
+                          TicketCategoryRepository ticketCategoryRepository,
+                          TicketRepository ticketRepository) {
+        this.eventRepository = eventRepository;
+        this.organizationRepository = organizationRepository;
+        this.configurationManager = configurationManager;
+        this.fileUploadManager = fileUploadManager;
+        this.eventDescriptionRepository = eventDescriptionRepository;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.ticketRepository = ticketRepository;
+    }
 
 
     public boolean writePass(Ticket ticket, EventAndOrganizationId event, OutputStream out) throws IOException, PassSigningException {
@@ -85,6 +104,10 @@ public class PassKitManager {
 
     byte[] getPass(Map<String, String> model) {
         try {
+            if (BooleanUtils.TRUE.equals(model.get(Mailer.SKIP_PASSBOOK))) {
+                log.trace("HTML email enabled. Skipping passbook generation");
+                return null;
+            }
             Ticket ticket = Json.fromJson(model.get("ticket"), Ticket.class);
             int eventId = ticket.getEventId();
             Event event = eventRepository.findById(eventId);
@@ -150,7 +173,8 @@ public class PassKitManager {
         String privateKeyAlias = config.get(PASSBOOK_PRIVATE_KEY_ALIAS);
 
 
-        String eventDescription = eventDescriptionRepository.findDescriptionByEventIdTypeAndLocale(event.getId(), EventDescription.EventDescriptionType.DESCRIPTION, ticket.getUserLanguage()).orElse("");
+        String eventDescription = MustacheCustomTag.renderToTextCommonmark(
+            eventDescriptionRepository.findDescriptionByEventIdTypeAndLocale(event.getId(), EventDescription.EventDescriptionType.DESCRIPTION, ticket.getUserLanguage()).orElse(""));
         TicketCategory category = ticketCategoryRepository.getById(ticket.getCategoryId());
         var ticketValidityStart = Optional.ofNullable(category.getTicketValidityStart(event.getZoneId())).orElse(event.getBegin());
         Pass pass = new Pass()
@@ -165,7 +189,7 @@ public class PassKitManager {
             .relevantDate(Date.from(ticketValidityStart.toInstant()))
             .expirationDate(Date.from(Optional.ofNullable(category.getTicketValidityEnd(event.getZoneId())).orElse(event.getEnd()).toInstant()))
 
-            .barcode(new Barcode(BarcodeFormat.QR, ticket.ticketCode(event.getPrivateKey())))
+            .barcode(new Barcode(BarcodeFormat.QR, ticket.ticketCode(event.getPrivateKey(), event.supportsQRCodeCaseInsensitive())))
             .labelColor(Color.BLACK)
             .foregroundColor(Color.BLACK)
             .backgroundColor(Color.WHITE)
@@ -213,7 +237,7 @@ public class PassKitManager {
         });
 
         pass.files(passResources.toArray(new PassResource[0]));
-        try(InputStream appleCert = new ClassPathResource("/alfio/certificates/AppleWWDRCA.cer").getInputStream()) {
+        try(InputStream appleCert = new ClassPathResource("/alfio/certificates/AppleWWDRCAG4.cer").getInputStream()) {
             PassSigner signer = PassSignerImpl.builder()
                 .keystore(new ByteArrayInputStream(keystoreRaw), keystorePwd)
                 .alias(privateKeyAlias)
@@ -226,6 +250,14 @@ public class PassKitManager {
     private String buildAuthenticationToken(Ticket ticket, EventAndOrganizationId event, String privateKey) {
         var code = event.getId() + "/" + ticket.getTicketsReservationId() + "/" + ticket.getUuid();
         return Ticket.hmacSHA256Base64(privateKey, code);
+    }
+
+    public Optional<Pair<EventAndOrganizationId, Ticket>> retrieveTicketDetails(String eventName, String ticketUuid) {
+        return eventRepository.findOptionalEventAndOrganizationIdByShortName(eventName)
+            .flatMap(e -> ticketRepository.findOptionalByUUID(ticketUuid)
+                .filter(t -> e.getId() == t.getEventId())
+                .map(t -> Pair.of(e, t))
+            );
     }
 
     public Optional<Pair<EventAndOrganizationId, Ticket>> validateToken(String eventName, String typeIdentifier, String ticketUuid, String authorizationHeader) {

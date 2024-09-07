@@ -16,18 +16,17 @@
  */
 package alfio.controller.api.v2.user;
 
+import alfio.controller.api.support.BookingInfoTicketLoader;
 import alfio.controller.api.support.TicketHelper;
 import alfio.controller.api.v2.model.PaymentProxyWithParameters;
 import alfio.controller.api.v2.model.ReservationInfo;
 import alfio.controller.api.v2.model.ReservationInfo.TicketsByTicketCategory;
 import alfio.controller.api.v2.model.ReservationPaymentResult;
 import alfio.controller.api.v2.model.ReservationStatusInfo;
-import alfio.controller.api.v2.user.support.BookingInfoTicketLoader;
 import alfio.controller.api.v2.user.support.ReservationAccessDenied;
 import alfio.controller.form.ContactAndTicketsForm;
 import alfio.controller.form.PaymentForm;
 import alfio.controller.form.ReservationCodeForm;
-import alfio.controller.form.UpdateTicketOwnerForm;
 import alfio.controller.support.CustomBindingResult;
 import alfio.controller.support.TemplateProcessor;
 import alfio.manager.*;
@@ -37,38 +36,29 @@ import alfio.manager.payment.StripeCreditCardManager;
 import alfio.manager.support.PaymentResult;
 import alfio.manager.support.response.ValidatedResponse;
 import alfio.manager.system.ConfigurationManager;
-import alfio.manager.system.ReservationPriceCalculator;
 import alfio.manager.user.PublicUserManager;
-import alfio.manager.user.UserManager;
 import alfio.model.*;
 import alfio.model.PurchaseContext.PurchaseContextType;
-import alfio.model.extension.AdditionalInfoItem;
-import alfio.model.subscription.Subscription;
-import alfio.model.subscription.SubscriptionUsageExceeded;
-import alfio.model.subscription.SubscriptionUsageExceededForEvent;
+import alfio.model.metadata.SubscriptionMetadata;
 import alfio.model.subscription.UsageDetails;
 import alfio.model.system.ConfigurationKeys;
 import alfio.model.transaction.*;
-import alfio.model.user.AdditionalInfoWithLabel;
-import alfio.model.user.PublicUserProfile;
 import alfio.repository.*;
 import alfio.util.*;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSourceResolvable;
 import org.springframework.context.support.DefaultMessageSourceResolvable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
-import org.springframework.util.Assert;
 import org.springframework.util.MultiValueMap;
 import org.springframework.validation.BindingResult;
 import org.springframework.validation.Errors;
-import org.springframework.validation.ValidationUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpServletRequest;
@@ -79,21 +69,18 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.function.BiFunction;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
-import static alfio.model.PriceContainer.VatStatus.*;
-import static alfio.model.system.ConfigurationKeys.*;
-import static alfio.util.MonetaryUtil.unitToCents;
-import static java.util.Objects.requireNonNullElse;
+import static alfio.model.system.ConfigurationKeys.ENABLE_ITALY_E_INVOICING;
+import static alfio.model.system.ConfigurationKeys.FORCE_TICKET_OWNER_ASSIGNMENT_AT_RESERVATION;
+import static java.util.Objects.requireNonNullElseGet;
 import static java.util.stream.Collectors.toMap;
-import static org.apache.commons.lang3.StringUtils.trimToNull;
 
 @RestController
-@AllArgsConstructor
 @RequestMapping("/api/v2/public/")
-@Log4j2
 public class ReservationApiV2Controller {
+
+    private static final Logger log = LoggerFactory.getLogger(ReservationApiV2Controller.class);
 
     private final EventManager eventManager;
     private final EventRepository eventRepository;
@@ -110,15 +97,59 @@ public class ReservationApiV2Controller {
     private final EuVatChecker vatChecker;
     private final RecaptchaService recaptchaService;
     private final BookingInfoTicketLoader bookingInfoTicketLoader;
-    private final PromoCodeDiscountRepository promoCodeDiscountRepository;
-    private final AdditionalServiceItemRepository additionalServiceItemRepository;
-    private final AdditionalServiceRepository additionalServiceRepository;
     private final BillingDocumentManager billingDocumentManager;
     private final PurchaseContextManager purchaseContextManager;
     private final SubscriptionRepository subscriptionRepository;
     private final TicketRepository ticketRepository;
-    private final UserManager userManager;
     private final PublicUserManager publicUserManager;
+    private final ReverseChargeManager reverseChargeManager;
+    private final TicketCategoryRepository ticketCategoryRepository;
+
+    public ReservationApiV2Controller(EventManager eventManager,
+                                      EventRepository eventRepository,
+                                      TicketReservationManager ticketReservationManager,
+                                      TicketReservationRepository ticketReservationRepository,
+                                      TicketFieldRepository ticketFieldRepository,
+                                      MessageSourceManager messageSourceManager,
+                                      ConfigurationManager configurationManager,
+                                      PaymentManager paymentManager,
+                                      FileUploadManager fileUploadManager,
+                                      TemplateManager templateManager,
+                                      ExtensionManager extensionManager,
+                                      TicketHelper ticketHelper,
+                                      EuVatChecker vatChecker,
+                                      RecaptchaService recaptchaService,
+                                      BookingInfoTicketLoader bookingInfoTicketLoader,
+                                      BillingDocumentManager billingDocumentManager,
+                                      PurchaseContextManager purchaseContextManager,
+                                      SubscriptionRepository subscriptionRepository,
+                                      TicketRepository ticketRepository,
+                                      PublicUserManager publicUserManager,
+                                      ReverseChargeManager reverseChargeManager,
+                                      TicketCategoryRepository ticketCategoryRepository) {
+        this.eventManager = eventManager;
+        this.eventRepository = eventRepository;
+        this.ticketReservationManager = ticketReservationManager;
+        this.ticketReservationRepository = ticketReservationRepository;
+        this.ticketFieldRepository = ticketFieldRepository;
+        this.messageSourceManager = messageSourceManager;
+        this.configurationManager = configurationManager;
+        this.paymentManager = paymentManager;
+        this.fileUploadManager = fileUploadManager;
+        this.templateManager = templateManager;
+        this.extensionManager = extensionManager;
+        this.ticketHelper = ticketHelper;
+        this.vatChecker = vatChecker;
+        this.recaptchaService = recaptchaService;
+        this.bookingInfoTicketLoader = bookingInfoTicketLoader;
+        this.billingDocumentManager = billingDocumentManager;
+        this.purchaseContextManager = purchaseContextManager;
+        this.subscriptionRepository = subscriptionRepository;
+        this.ticketRepository = ticketRepository;
+        this.publicUserManager = publicUserManager;
+        this.reverseChargeManager = reverseChargeManager;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+    }
 
     /**
      * Note: now it will return for any states of the reservation.
@@ -146,7 +177,7 @@ public class ReservationApiV2Controller {
             boolean hasPaidSupplement = ticketReservationManager.hasPaidSupplements(reservationId);
             //
 
-            var ticketsInfo = purchaseContext.event().map(event -> {
+            var ticketsInfo = purchaseContext.event().filter(e -> !ticketIds.isEmpty()).map(event -> {
                 var valuesByTicketIds = ticketFieldRepository.findAllValuesByTicketIds(ticketIds)
                     .stream()
                     .collect(Collectors.groupingBy(TicketFieldValue::getTicketId));
@@ -177,10 +208,7 @@ public class ReservationApiV2Controller {
 
             var additionalInfo = ticketReservationRepository.getAdditionalInfo(reservationId);
 
-            var shortReservationId =  ticketReservationManager.getShortReservationID(purchaseContext, reservation);
-            var italianInvoicing = additionalInfo.getInvoicingAdditionalInfo().getItalianEInvoicing() == null ?
-                new TicketReservationInvoicingAdditionalInfo.ItalianEInvoicing(null, null, null, null, false) :
-                additionalInfo.getInvoicingAdditionalInfo().getItalianEInvoicing();
+            var shortReservationId =  configurationManager.getShortReservationID(purchaseContext, reservation);
             //
 
 
@@ -196,14 +224,16 @@ public class ReservationApiV2Controller {
             List<ReservationInfo.SubscriptionInfo> subscriptionInfos = null;
             if (purchaseContext.ofType(PurchaseContextType.subscription)) {
                 subscriptionInfos = subscriptionRepository.findSubscriptionsByReservationId(reservationId).stream()
-                    .limit(1) // since we support only one subscription for now, it make sense to limit the result to avoid N+1
+                    .limit(1) // since we support only one subscription for now, it makes sense to limit the result to avoid N+1
                     .map(s -> {
                         int usageCount = ticketRepository.countSubscriptionUsage(s.getId(), null);
+                        var metadata = requireNonNullElseGet(subscriptionRepository.getSubscriptionMetadata(s.getId()), SubscriptionMetadata::empty);
                         return new ReservationInfo.SubscriptionInfo(
                             s.getStatus() == AllocationStatus.ACQUIRED ? s.getId() : null,
                             s.getStatus() == AllocationStatus.ACQUIRED ? s.getPin() : null,
                             UsageDetails.fromSubscription(s, usageCount),
-                            new ReservationInfo.SubscriptionOwner(s.getFirstName(), s.getLastName(), s.getEmail()));
+                            new ReservationInfo.SubscriptionOwner(s.getFirstName(), s.getLastName(), s.getEmail()),
+                            metadata.getConfiguration());
                     })
                     .collect(Collectors.toList());
             }
@@ -229,7 +259,8 @@ public class ReservationApiV2Controller {
                 //
                 containsCategoriesLinkedToGroups,
                 getActivePaymentMethods(purchaseContext, ticketsByCategory.keySet(), orderSummary, reservationId),
-                subscriptionInfos
+                subscriptionInfos,
+                ticketReservationRepository.getMetadata(reservationId)
                 ));
         }));
 
@@ -313,7 +344,7 @@ public class ReservationApiV2Controller {
                 return buildReservationPaymentStatus(bindingResult);
             }
 
-            if(isCaptchaInvalid(reservationCost.getPriceWithVAT(), paymentForm.getPaymentProxy(), paymentForm.getCaptcha(), request, event)) {
+            if(isCaptchaInvalid(reservationCost.priceWithVAT(), paymentForm.getPaymentProxy(), paymentForm.getCaptcha(), request, event)) {
                 log.debug("captcha validation failed.");
                 bindingResult.reject(ErrorsCode.STEP_2_CAPTCHA_VALIDATION_FAILED);
             }
@@ -335,7 +366,7 @@ public class ReservationApiV2Controller {
                 paymentToken = paymentManager.buildPaymentToken(paymentForm.getGatewayToken(), paymentForm.getPaymentProxy(),
                     new PaymentContext(event, reservationId));
             }
-            PaymentSpecification spec = new PaymentSpecification(reservationId, paymentToken, reservationCost.getPriceWithVAT(),
+            PaymentSpecification spec = new PaymentSpecification(reservationId, paymentToken, reservationCost.priceWithVAT(),
                 event, reservation.getEmail(), customerName, reservation.getBillingAddress(), reservation.getCustomerReference(),
                 locale, reservation.isInvoiceRequested(), !reservation.isDirectAssignmentRequested(),
                 orderSummary, reservation.getVatCountryCode(), reservation.getVatNr(), reservation.getVatStatus(),
@@ -398,10 +429,10 @@ public class ReservationApiV2Controller {
 
             boolean invoiceOnly = configurationManager.isInvoiceOnly(purchaseContext);
 
-            if(invoiceOnly && reservationCost.getPriceWithVAT() > 0) {
+            if(invoiceOnly && reservationCost.priceWithVAT() > 0) {
                 //override, that's why we save it
                 contactAndTicketsForm.setInvoiceRequested(true);
-            } else if (reservationCost.getPriceWithVAT() == 0) {
+            } else if (reservationCost.priceWithVAT() == 0) {
                 contactAndTicketsForm.setInvoiceRequested(false);
             }
 
@@ -409,9 +440,21 @@ public class ReservationApiV2Controller {
 
 
             ticketReservationRepository.resetVat(reservationId, contactAndTicketsForm.isInvoiceRequested(), purchaseContext.getVatStatus(),
-                reservation.getSrcPriceCts(), reservationCost.getPriceWithVAT(), reservationCost.getVAT(), Math.abs(reservationCost.getDiscount()), reservation.getCurrencyCode());
-            if(contactAndTicketsForm.isBusiness()) {
-                checkAndApplyVATRules(purchaseContext, reservationId, contactAndTicketsForm, bindingResult);
+                reservation.getSrcPriceCts(), reservationCost.priceWithVAT(), reservationCost.VAT(), Math.abs(reservationCost.discount()), reservation.getCurrencyCode());
+
+            var optionalCustomTaxPolicy = extensionManager.handleCustomTaxPolicy(purchaseContext, reservationId, contactAndTicketsForm, reservationCost);
+            if (optionalCustomTaxPolicy.isPresent()) {
+                log.debug("Custom tax policy returned for reservation {}. Applying it.", reservationId);
+                reverseChargeManager.applyCustomTaxPolicy(
+                    purchaseContext,
+                    optionalCustomTaxPolicy.get(),
+                    reservationId,
+                    contactAndTicketsForm,
+                    bindingResult);
+            } else if(reservationCost.priceWithVAT() > 0 && (contactAndTicketsForm.isBusiness() || configurationManager.noTaxesFlagDefinedFor(ticketCategoryRepository.findCategoriesInReservation(reservationId)))) {
+                reverseChargeManager.checkAndApplyVATRules(purchaseContext, reservationId, contactAndTicketsForm, bindingResult);
+            } else if(reservationCost.priceWithVAT() > 0) {
+                reverseChargeManager.resetVat(purchaseContext, reservationId);
             }
 
             //persist data
@@ -445,7 +488,7 @@ public class ReservationApiV2Controller {
 
             //
             contactAndTicketsForm.validate(bindingResult, purchaseContext, new SameCountryValidator(configurationManager, extensionManager, purchaseContext, reservationId, vatChecker),
-                formValidationParameters, ticketFieldFilterer);
+                formValidationParameters, ticketFieldFilterer, reservationCost.requiresPayment());
             //
 
             if(!bindingResult.hasErrors()) {
@@ -504,59 +547,6 @@ public class ReservationApiV2Controller {
                 }
             });
         }
-    }
-
-    private void checkAndApplyVATRules(PurchaseContext purchaseContext, String reservationId, ContactAndTicketsForm contactAndTicketsForm, BindingResult bindingResult) {
-        // VAT handling
-        String country = contactAndTicketsForm.getVatCountryCode();
-
-        // validate VAT presence if EU mode is enabled
-        if (vatChecker.isReverseChargeEnabledFor(purchaseContext) && (country == null || isEUCountry(country))) {
-            ValidationUtils.rejectIfEmptyOrWhitespace(bindingResult, "vatNr", "error.emptyField");
-        }
-
-        try {
-            var optionalReservation = ticketReservationRepository.findOptionalReservationById(reservationId);
-            Optional<VatDetail> vatDetail = optionalReservation
-                .filter(e -> EnumSet.of(INCLUDED, NOT_INCLUDED).contains(purchaseContext.getVatStatus()))
-                .filter(e -> vatChecker.isReverseChargeEnabledFor(purchaseContext))
-                .flatMap(e -> vatChecker.checkVat(contactAndTicketsForm.getVatNr(), country, purchaseContext));
-
-
-            if(vatDetail.isPresent()) {
-                var vatValidation = vatDetail.get();
-                if (!vatValidation.isValid()) {
-                    bindingResult.rejectValue("vatNr", "error.STEP_2_INVALID_VAT");
-                } else {
-                    var reservation = ticketReservationManager.findById(reservationId).orElseThrow();
-                    var currencyCode = reservation.getCurrencyCode();
-                    PriceContainer.VatStatus vatStatus = determineVatStatus(purchaseContext.getVatStatus(), vatValidation.isVatExempt());
-                    updateBillingData(reservationId, contactAndTicketsForm, purchaseContext, country, trimToNull(vatValidation.getVatNr()), reservation, vatStatus);
-                    vatChecker.logSuccessfulValidation(vatValidation, reservationId, purchaseContext.event().map(Event::getId).orElse(null));
-                }
-            } else if(optionalReservation.isPresent() && contactAndTicketsForm.isItalyEInvoicingSplitPayment()) {
-                var reservation = optionalReservation.get();
-                var vatStatus = purchaseContext.getVatStatus() == INCLUDED ? INCLUDED_NOT_CHARGED : NOT_INCLUDED_NOT_CHARGED;
-                updateBillingData(reservationId, contactAndTicketsForm, purchaseContext, country, trimToNull(contactAndTicketsForm.getVatNr()), reservation, vatStatus);
-            }
-        } catch (IllegalStateException ise) {//vat checker failure
-            bindingResult.rejectValue("vatNr", "error.vatVIESDown");
-        }
-    }
-
-    private void updateBillingData(String reservationId, ContactAndTicketsForm contactAndTicketsForm, PurchaseContext purchaseContext, String country, String vatNr, TicketReservation reservation, PriceContainer.VatStatus vatStatus) {
-        var discount = reservation.getPromoCodeDiscountId() != null ? promoCodeDiscountRepository.findById(reservation.getPromoCodeDiscountId()) : null;
-        var additionalServiceItems = additionalServiceItemRepository.findByReservationUuid(reservation.getId());
-        var tickets = ticketReservationManager.findTicketsInReservation(reservation.getId());
-        var additionalServices = purchaseContext.event().map(event -> additionalServiceRepository.loadAllForEvent(event.getId())).orElse(List.of());
-        var subscriptions = subscriptionRepository.findSubscriptionsByReservationId(reservationId);
-        var appliedSubscription = subscriptionRepository.findAppliedSubscriptionByReservationId(reservationId);
-        var calculator = new ReservationPriceCalculator(reservation.withVatStatus(vatStatus), discount, tickets, additionalServiceItems, additionalServices, purchaseContext, subscriptions, appliedSubscription);
-        var currencyCode = reservation.getCurrencyCode();
-        ticketReservationRepository.updateBillingData(vatStatus, reservation.getSrcPriceCts(),
-            unitToCents(calculator.getFinalPrice(), currencyCode), unitToCents(calculator.getVAT(), currencyCode), unitToCents(calculator.getAppliedDiscount(), currencyCode),
-            reservation.getCurrencyCode(), vatNr,
-            country, contactAndTicketsForm.isInvoiceRequested(), reservationId);
     }
 
     private Optional<Pair<PurchaseContext, TicketReservation>> getReservation(String reservationId) {
@@ -674,7 +664,7 @@ public class ReservationApiV2Controller {
             return ResponseEntity.badRequest().build();
         }
 
-        Optional<ResponseEntity<TransactionInitializationToken>> responseEntity = getEventReservationPair(reservationId)
+        Optional<ResponseEntity<TransactionInitializationToken>> responseEntity = purchaseContextManager.getReservationWithPurchaseContext(reservationId)
             .map(pair -> {
                 var event = pair.getLeft();
                 return ticketReservationManager.initTransaction(event, reservationId, paymentMethod, allParams)
@@ -691,7 +681,7 @@ public class ReservationApiV2Controller {
     public ResponseEntity<Boolean> removeToken(@PathVariable("eventName") String eventName,
                                                @PathVariable("reservationId") String reservationId) {
 
-        var res = getEventReservationPair(reservationId).map(et -> paymentManager.removePaymentTokenReservation(et.getRight().getId())).orElse(false);
+        var res = purchaseContextManager.getReservationWithPurchaseContext(reservationId).map(et -> paymentManager.removePaymentTokenReservation(et.getRight().getId())).orElse(false);
         return ResponseEntity.ok(res);
     }
 
@@ -701,16 +691,8 @@ public class ReservationApiV2Controller {
     })
     public ResponseEntity<Boolean> deletePaymentAttempt(@PathVariable("reservationId") String reservationId) {
 
-        var res = getEventReservationPair(reservationId).map(et -> ticketReservationManager.cancelPendingPayment(et.getRight().getId(), et.getLeft())).orElse(false);
+        var res = purchaseContextManager.getReservationWithPurchaseContext(reservationId).map(et -> ticketReservationManager.cancelPendingPayment(et.getRight().getId(), et.getLeft())).orElse(false);
         return ResponseEntity.ok(res);
-    }
-
-    //FIXME: rename ->getPurchaseContextReservationPair
-    private Optional<Pair<PurchaseContext, TicketReservation>> getEventReservationPair(String reservationId) {
-        return purchaseContextManager.findByReservationId(reservationId)
-            .map(event -> Pair.of(event, ticketReservationManager.findById(reservationId)))
-            .filter(pair -> pair.getRight().isPresent())
-            .map(pair -> Pair.of(pair.getLeft(), pair.getRight().orElseThrow()));
     }
 
     @GetMapping({
@@ -727,7 +709,7 @@ public class ReservationApiV2Controller {
             return ResponseEntity.badRequest().build();
         }
 
-        return getEventReservationPair(reservationId)
+        return purchaseContextManager.getReservationWithPurchaseContext(reservationId)
             .flatMap(pair -> paymentManager.getTransactionStatus(pair.getRight(), paymentMethod))
             .map(pr -> ResponseEntity.ok(new ReservationPaymentResult(pr.isSuccessful(), pr.isRedirect(), pr.getRedirectUrl(), pr.isFailed(), pr.getGatewayIdOrNull())))
             .orElseGet(() -> ResponseEntity.notFound().build());
@@ -738,57 +720,14 @@ public class ReservationApiV2Controller {
         if(reservationCodeForm.getType() != ReservationCodeForm.ReservationCodeType.SUBSCRIPTION) {
             throw new IllegalStateException(reservationCodeForm.getType() + " not supported");
         }
-        boolean res = getEventReservationPair(reservationId).map(et -> {
-            boolean isUUID = reservationCodeForm.isCodeUUID();
-            log.trace("is code UUID {}", isUUID);
-            var pin = reservationCodeForm.getCode();
-            if (!isUUID && !PinGenerator.isPinValid(pin, Subscription.PIN_LENGTH)) {
-                bindingResult.reject("error.restrictedValue");
-                return false;
-            }
-
-            //ensure pin length, as we will do a like concat(pin,'%'), it could be dangerous to have an empty string...
-            Assert.isTrue(pin.length() >= Subscription.PIN_LENGTH, "Pin must have a length of at least 8 characters");
-
-            var partialUuid = !isUUID ? PinGenerator.pinToPartialUuid(pin, Subscription.PIN_LENGTH) : pin;
-            var email = reservationCodeForm.getEmail();
-            var requireEmail = false;
-            int count;
-            if (isUUID) {
-                count = subscriptionRepository.countSubscriptionById(UUID.fromString(pin));
-            } else {
-                count = subscriptionRepository.countSubscriptionByPartialUuid(partialUuid);
-                if (count > 1) {
-                    count = subscriptionRepository.countSubscriptionByPartialUuidAndEmail(partialUuid, email);
-                    requireEmail = true;
-                }
-            }
-            log.trace("code count is {}", count);
-            if (count == 0) {
-                bindingResult.reject(isUUID ? "subscription.uuid.not.found" : "subscription.pin.not.found");
-            }
-            if (count > 1) {
-                bindingResult.reject("subscription.code.insert.full");
-            }
-
-            if (bindingResult.hasErrors()) {
-                return false;
-            }
-
-            var subscriptionId = isUUID ? UUID.fromString(pin) : requireEmail ? subscriptionRepository.getSubscriptionIdByPartialUuidAndEmail(partialUuid, email) : subscriptionRepository.getSubscriptionIdByPartialUuid(partialUuid);
-            var subscriptionDescriptor = subscriptionRepository.findDescriptorBySubscriptionId(subscriptionId);
-            var subscription = subscriptionRepository.findSubscriptionById(subscriptionId);
-            subscription.isValid(Optional.of(bindingResult));
-            if (bindingResult.hasErrors()) {
-                return false;
-            }
-            try {
-                return ticketReservationManager.applySubscriptionCode(((Event)et.getLeft()).getId(), et.getRight(), subscriptionDescriptor, subscriptionId);
-            } catch (SubscriptionUsageExceeded | SubscriptionUsageExceededForEvent ex) {
-                bindingResult.reject(ex instanceof SubscriptionUsageExceeded ? "subscription.max-usage-reached" : "subscription.max-usage-reached-per-event");
-                return false;
-            }
-        }).orElse(false);
+        boolean res = purchaseContextManager.getReservationWithPurchaseContext(reservationId)
+            .map(et -> ticketReservationManager.validateAndApplySubscriptionCode(et.getLeft(),
+                et.getRight(),
+                reservationCodeForm.getCodeAsUUID(),
+                reservationCodeForm.getCode(),
+                reservationCodeForm.getEmail(),
+                bindingResult))
+            .orElse(false);
         return ResponseEntity.ok(ValidatedResponse.toResponse(bindingResult, res));
     }
 
@@ -796,7 +735,7 @@ public class ReservationApiV2Controller {
     public ResponseEntity<Boolean> removeCode(@PathVariable("reservationId") String reservationId, @RequestParam("type") ReservationCodeForm.ReservationCodeType type) {
         boolean res = false;
         if (type == ReservationCodeForm.ReservationCodeType.SUBSCRIPTION) {
-            res = getEventReservationPair(reservationId).map(et -> ticketReservationManager.removeSubscription(et.getRight())).orElse(false);
+            res = purchaseContextManager.getReservationWithPurchaseContext(reservationId).map(et -> ticketReservationManager.removeSubscription(et.getRight())).orElse(false);
         }
         return ResponseEntity.ok(res);
     }
@@ -813,18 +752,6 @@ public class ReservationApiV2Controller {
         }
         return res;
     }
-
-    private boolean isEUCountry(String countryCode) {
-        return configurationManager.getForSystem(EU_COUNTRIES_LIST).getRequiredValue().contains(countryCode);
-    }
-
-    private static PriceContainer.VatStatus determineVatStatus(PriceContainer.VatStatus current, boolean isVatExempt) {
-        if(!isVatExempt) {
-            return current;
-        }
-        return current == NOT_INCLUDED ? NOT_INCLUDED_EXEMPT : INCLUDED_EXEMPT;
-    }
-
 
     private boolean isCaptchaInvalid(int cost, PaymentProxy paymentMethod, String recaptchaResponse, HttpServletRequest request, Configurable configurable) {
         return (cost == 0 || paymentMethod == PaymentProxy.OFFLINE || paymentMethod == PaymentProxy.ON_SITE)

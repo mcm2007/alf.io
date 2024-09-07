@@ -27,7 +27,6 @@ import alfio.util.ClockProvider;
 import alfio.util.LocaleUtil;
 import alfio.util.TemplateManager;
 import alfio.util.TemplateResource;
-import lombok.AllArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.springframework.stereotype.Component;
@@ -38,10 +37,8 @@ import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static alfio.model.system.ConfigurationKeys.USE_PARTNER_CODE_INSTEAD_OF_PROMOTIONAL;
-import static java.util.stream.Collectors.toList;
 
 @Component
-@AllArgsConstructor
 @Transactional
 public class SpecialPriceManager {
 
@@ -55,15 +52,33 @@ public class SpecialPriceManager {
     private final ConfigurationManager configurationManager;
     private final ClockProvider clockProvider;
 
+    public SpecialPriceManager(EventManager eventManager,
+                               NotificationManager notificationManager,
+                               SpecialPriceRepository specialPriceRepository,
+                               TemplateManager templateManager,
+                               MessageSourceManager messageSourceManager,
+                               I18nManager i18nManager,
+                               ConfigurationManager configurationManager,
+                               ClockProvider clockProvider) {
+        this.eventManager = eventManager;
+        this.notificationManager = notificationManager;
+        this.specialPriceRepository = specialPriceRepository;
+        this.templateManager = templateManager;
+        this.messageSourceManager = messageSourceManager;
+        this.i18nManager = i18nManager;
+        this.configurationManager = configurationManager;
+        this.clockProvider = clockProvider;
+    }
+
     private List<String> checkCodeAssignment(Set<SendCodeModification> input, int categoryId, EventAndOrganizationId event, String username) {
         final TicketCategory category = checkOwnership(categoryId, event, username);
         List<String> availableCodes = specialPriceRepository.findActiveByCategoryIdForUpdate(category.getId(), input.size())
             .stream()
-            .map(SpecialPrice::getCode).collect(toList());
+            .map(SpecialPrice::getCode).toList();
         Validate.isTrue(input.size() <= availableCodes.size(), "Requested codes: "+input.size()+ ", available: "+availableCodes.size()+".");
-        List<String> requestedCodes = input.stream().filter(IS_CODE_PRESENT).map(SendCodeModification::getCode).collect(toList());
+        List<String> requestedCodes = input.stream().filter(IS_CODE_PRESENT).map(SendCodeModification::getCode).toList();
         Validate.isTrue(requestedCodes.stream().distinct().count() == requestedCodes.size(), "Cannot assign the same code twice. Please fix the input file.");
-        Validate.isTrue(availableCodes.containsAll(requestedCodes), "some requested codes don't exist.");
+        Validate.isTrue(new HashSet<>(availableCodes).containsAll(requestedCodes), "some requested codes don't exist.");
         return availableCodes;
     }
 
@@ -82,14 +97,14 @@ public class SpecialPriceManager {
         final Iterator<String> codes = availableCodes.iterator();
         return Stream.concat(set.stream().filter(IS_CODE_PRESENT), input.stream().filter(IS_CODE_PRESENT.negate())
             .map(p -> new SendCodeModification(codes.next(), p.getAssignee(), p.getEmail(), p.getLanguage())))
-            .collect(toList());
+            .toList();
     }
 
     public List<SpecialPrice> loadSentCodes(String eventName, int categoryId, String username) {
         final EventAndOrganizationId event = eventManager.getEventAndOrganizationId(eventName, username);
         checkOwnership(categoryId, event, username);
         Predicate<SpecialPrice> p = SpecialPrice::notSent;
-        return specialPriceRepository.findAllByCategoryId(categoryId).stream().filter(p.negate()).collect(toList());
+        return specialPriceRepository.findAllByCategoryId(categoryId).stream().filter(p.negate()).toList();
     }
 
     public boolean clearRecipientData(String eventName, int categoryId, int codeId, String username) {

@@ -35,6 +35,7 @@ public final class HttpUtils {
 
     public static final String CONTENT_TYPE = "Content-Type";
     public static final String APPLICATION_JSON = "application/json";
+    public static final String APPLICATION_JSON_UTF8 = "application/json;charset=UTF-8";
     public static final String APPLICATION_FORM_URLENCODED = "application/x-www-form-urlencoded";
     public static final String MULTIPART_FORM_DATA = "multipart/form-data";
     public static final String AUTHORIZATION = "Authorization";
@@ -74,8 +75,8 @@ public final class HttpUtils {
 
     // https://stackoverflow.com/a/54675316
     public static class MultiPartBodyPublisher {
-        private List<PartsSpecification> partsSpecificationList = new ArrayList<>();
-        private String boundary = UUID.randomUUID().toString();
+        private final List<PartsSpecification> partsSpecificationList = new ArrayList<>();
+        private final String boundary = UUID.randomUUID().toString();
 
         public HttpRequest.BodyPublisher build() {
             if (partsSpecificationList.size() == 0) {
@@ -132,7 +133,7 @@ public final class HttpUtils {
 
         class PartsIterator implements Iterator<byte[]> {
 
-            private Iterator<PartsSpecification> iter;
+            private final Iterator<PartsSpecification> iter;
             private InputStream currentFileInput;
 
             private boolean done;

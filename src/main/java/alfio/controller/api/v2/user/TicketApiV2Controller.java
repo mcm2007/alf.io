@@ -16,36 +16,32 @@
  */
 package alfio.controller.api.v2.user;
 
+import alfio.controller.api.support.BookingInfoTicketLoader;
 import alfio.controller.api.support.TicketHelper;
 import alfio.controller.api.v2.model.DatesWithTimeZoneOffset;
 import alfio.controller.api.v2.model.OnlineCheckInInfo;
 import alfio.controller.api.v2.model.ReservationInfo;
 import alfio.controller.api.v2.model.TicketInfo;
-import alfio.controller.api.v2.user.support.BookingInfoTicketLoader;
 import alfio.controller.form.UpdateTicketOwnerForm;
 import alfio.controller.support.Formatters;
 import alfio.controller.support.TemplateProcessor;
-import alfio.manager.ExtensionManager;
-import alfio.manager.FileUploadManager;
-import alfio.manager.NotificationManager;
-import alfio.manager.TicketReservationManager;
+import alfio.manager.*;
 import alfio.manager.i18n.MessageSourceManager;
 import alfio.manager.support.response.ValidatedResponse;
-import alfio.model.Event;
-import alfio.model.Ticket;
-import alfio.model.TicketCategory;
-import alfio.model.TicketReservation;
+import alfio.manager.system.ConfigurationManager;
+import alfio.model.*;
 import alfio.model.transaction.PaymentProxy;
 import alfio.model.user.Organization;
 import alfio.repository.TicketCategoryRepository;
+import alfio.repository.TicketRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.util.ImageUtil;
 import alfio.util.LocaleUtil;
 import alfio.util.TemplateManager;
-import lombok.AllArgsConstructor;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -66,7 +62,6 @@ import java.util.Optional;
 import static alfio.util.EventUtil.firstMatchingCallLink;
 
 @RestController
-@AllArgsConstructor
 public class TicketApiV2Controller {
 
     private final TicketHelper ticketHelper;
@@ -79,6 +74,37 @@ public class TicketApiV2Controller {
     private final TemplateManager templateManager;
     private final NotificationManager notificationManager;
     private final BookingInfoTicketLoader bookingInfoTicketLoader;
+    private final TicketRepository ticketRepository;
+    private final SubscriptionManager subscriptionManager;
+    private final ConfigurationManager configurationManager;
+
+    public TicketApiV2Controller(TicketHelper ticketHelper,
+                                 TicketReservationManager ticketReservationManager,
+                                 TicketCategoryRepository ticketCategoryRepository,
+                                 MessageSourceManager messageSourceManager,
+                                 ExtensionManager extensionManager,
+                                 FileUploadManager fileUploadManager,
+                                 OrganizationRepository organizationRepository,
+                                 TemplateManager templateManager,
+                                 NotificationManager notificationManager,
+                                 BookingInfoTicketLoader bookingInfoTicketLoader,
+                                 TicketRepository ticketRepository,
+                                 SubscriptionManager subscriptionManager,
+                                 ConfigurationManager configurationManager) {
+        this.ticketHelper = ticketHelper;
+        this.ticketReservationManager = ticketReservationManager;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.messageSourceManager = messageSourceManager;
+        this.extensionManager = extensionManager;
+        this.fileUploadManager = fileUploadManager;
+        this.organizationRepository = organizationRepository;
+        this.templateManager = templateManager;
+        this.notificationManager = notificationManager;
+        this.bookingInfoTicketLoader = bookingInfoTicketLoader;
+        this.ticketRepository = ticketRepository;
+        this.subscriptionManager = subscriptionManager;
+        this.configurationManager = configurationManager;
+    }
 
 
     @GetMapping(value = {
@@ -95,7 +121,7 @@ public class TicketApiV2Controller {
         var event = oData.get().getLeft();
         var ticket = oData.get().getRight();
 
-        String qrCodeText = ticket.ticketCode(event.getPrivateKey());
+        String qrCodeText = ticket.ticketCode(event.getPrivateKey(), event.supportsQRCodeCaseInsensitive());
 
         response.setContentType("image/png");
 
@@ -116,16 +142,21 @@ public class TicketApiV2Controller {
             Event event = data.getLeft();
             TicketReservation ticketReservation = data.getMiddle();
 
-            response.setContentType("application/pdf");
+            response.setContentType(MediaType.APPLICATION_PDF_VALUE);
             response.addHeader("Content-Disposition", "attachment; filename=ticket-" + ticketIdentifier + ".pdf");
             try (OutputStream os = response.getOutputStream()) {
                 TicketCategory ticketCategory = ticketCategoryRepository.getByIdAndActive(ticket.getCategoryId(), event.getId());
                 Organization organization = organizationRepository.getById(event.getOrganizationId());
-                String reservationID = ticketReservationManager.getShortReservationID(event, ticketReservation);
-                TemplateProcessor.renderPDFTicket(LocaleUtil.getTicketLanguage(ticket, LocaleUtil.forLanguageTag(ticketReservation.getUserLanguage(), event)), event, ticketReservation,
-                    ticket, ticketCategory, organization,
+                String reservationID = configurationManager.getShortReservationID(event, ticketReservation);
+                var ticketWithMetadata = TicketWithMetadataAttributes.build(ticket, ticketRepository.getTicketMetadata(ticket.getId()));
+                var locale = LocaleUtil.getTicketLanguage(ticket, LocaleUtil.forLanguageTag(ticketReservation.getUserLanguage(), event));
+                TemplateProcessor.renderPDFTicket(
+                    locale, event, ticketReservation,
+                    ticketWithMetadata, ticketCategory, organization,
                     templateManager, fileUploadManager,
-                    reservationID, os, ticketHelper.buildRetrieveFieldValuesFunction(), extensionManager);
+                    reservationID, os, ticketHelper.buildRetrieveFieldValuesFunction(), extensionManager,
+                    TemplateProcessor.getSubscriptionDetailsModelForTicket(ticket, subscriptionManager::findDescriptorBySubscriptionId, locale)
+                );
             } catch (IOException ioe) {
                 throw new IllegalStateException(ioe);
             }
@@ -229,7 +260,7 @@ public class TicketApiV2Controller {
             ticket.getUuid(),
             ticketCategory.getName(),
             ticketReservation.getFullName(),
-            ticketReservationManager.getShortReservationID(event, ticketReservation),
+            configurationManager.getShortReservationID(event, ticketReservation),
             deskPaymentRequired,
             event.getTimeZone(),
             DatesWithTimeZoneOffset.fromEvent(event),
@@ -283,7 +314,7 @@ public class TicketApiV2Controller {
                 var ticket = info.getTicket();
                 var event = info.getEventWithCheckInInfo();
                 var messageSource = messageSourceManager.getMessageSourceFor(event.getOrganizationId(), event.getId());
-                String ticketCode = ticket.ticketCode(event.getPrivateKey());
+                String ticketCode = ticket.ticketCode(event.getPrivateKey(), event.supportsQRCodeCaseInsensitive());
                 if(MessageDigest.isEqual(DigestUtils.sha256Hex(ticketCode).getBytes(StandardCharsets.UTF_8), checkInCode.getBytes(StandardCharsets.UTF_8))) {
                     var categoryConfiguration = info.getCategoryMetadata().getOnlineConfiguration();
                     var eventConfiguration = event.getMetadata().getOnlineConfiguration();

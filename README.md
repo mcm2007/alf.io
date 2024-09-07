@@ -6,7 +6,10 @@ The open source ticket reservation system.
 [Alf.io](https://alf.io) is a free and open source event attendance management system, developed for event organizers who care about privacy, security and fair pricing policy for their customers.
 
 [![Build Status](https://github.com/alfio-event/alf.io/workflows/build/badge.svg)](https://github.com/alfio-event/alf.io/actions)
-[![Coverage Status](https://img.shields.io/coveralls/alfio-event/alf.io.svg)](https://coveralls.io/r/alfio-event/alf.io)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=alfio-event_alf.io&metric=security_rating)](https://sonarcloud.io/summary/overall?id=alfio-event_alf.io)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=alfio-event_alf.io&metric=reliability_rating)](https://sonarcloud.io/summary/overall?id=alfio-event_alf.io)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=alfio-event_alf.io&metric=coverage)](https://sonarcloud.io/summary/overall?id=alfio-event_alf.io)
+
 [![Financial Contributors on Open Collective](https://opencollective.com/alfio/all/badge.svg?label=financial+contributors)](https://opencollective.com/alfio)
 [![Docker Hub Pulls](https://img.shields.io/docker/pulls/alfio/alf.io.svg)](https://hub.docker.com/r/alfio/alf.io/tags)
 [![Open Source Helpers](https://www.codetriage.com/exteso/alf.io/badges/users.svg)](https://www.codetriage.com/exteso/alf.io)
@@ -14,13 +17,13 @@ The open source ticket reservation system.
 ## Warning
 
 As the work for Alf.io [v2](https://github.com/alfio-event/alf.io/milestones) has started, this branch may contain **unstable** and **untested** code.
-If you want to build and deploy alf.io by yourself, we strongly suggest you to use the [2.0-M3-maintenance](https://github.com/alfio-event/alf.io/tree/2.0-M3-maintenance) branch, as it contains production-ready code.
+If you want to build and deploy alf.io by yourself, we strongly suggest you to use the [2.0-M4-maintenance](https://github.com/alfio-event/alf.io/tree/2.0-M4-maintenance) branch, as it contains production-ready code.
 
 ## Prerequisites
 
-You should have installed Java version **11** (e.g. [Oracle's](http://www.oracle.com/technetwork/java/javase/downloads/index.html), [OpenJDK](http://openjdk.java.net/install/), or any other distribution) to build and run alf.io. Please note that for the build process the JDK is required.
+You should have installed Java version **17** (e.g. [Oracle's](http://www.oracle.com/technetwork/java/javase/downloads/index.html), [OpenJDK](http://openjdk.java.net/install/), or any other distribution) to build and run alf.io. Please note that for the build process the JDK is required.
 
-Postgresql version 9.6 or later.
+Postgresql version 10 or later.
 
 Additionally, the database user that creates and uses the tables should not be a "SUPERUSER", or else the row security policy checks will not be applied.
 
@@ -43,7 +46,7 @@ You must specify a project property at the command line, such as
 ```
 The local "bootRun" task has the following prerequisites:
 
-- a PostgreSQL (version 9.6 or later) instance up and running on localhost:5432
+- a PostgreSQL (version 10 or later) instance up and running on localhost:5432
 - a _postgres_ user having a password: _password_
 - a database named _alfio_
 
@@ -150,10 +153,10 @@ However, if you decide to do so, then you need to make a couple of changes:
  docker build -t alfio/alf.io ./build/dockerize
  ```
 
-### About the included AppleWWDRCA.cer
+### About the included AppleWWDRCAG4.cer
 
-The certificate at src/main/resources/alfio/certificates/AppleWWDRCA.cer has been imported for https://github.com/ryantenney/passkit4j#usage functionality.
-It will expire the 02/07/23 (as https://www.apple.com/certificateauthority/).
+The certificate at src/main/resources/alfio/certificates/AppleWWDRCAG4.cer has been imported for https://github.com/ryantenney/passkit4j#usage functionality.
+It will expire the 2030-10-12 (YYYY-MM-DD - as of https://www.apple.com/certificateauthority/).
 
 ## Available spring profiles:
 
@@ -171,7 +174,7 @@ This project exists thanks to all the people who contribute.
 
 ### Translation Contributors (POEditor)
 
-A big "Thank you" goes also to our translators, who help us on [POEditor](https://poeditor.com/join/project/ttBYTmPYdr):
+A big "Thank you" goes also to our translators, who help us on [POEditor](https://github.com/alfio-event/alf.io/tree/master/src/main/resources/alfio/i18n):
 
 (we show the complete name/profile only if we have received explicit consent to do so)
 
@@ -202,7 +205,8 @@ This project is sponsored by:
 
 <a href="https://swicket.io" target="_blank">
   <img alt="Swicket" src="https://swicket.io/logo-web.png" width="200">
-</a>
+</a><br/>
+<a href="https://www.browserstack.com/open-source" target="_blank"><img alt="Powered by BrowserStack" src="https://user-images.githubusercontent.com/2320747/150974875-769c7085-f8bf-49b8-aff9-b650231300eb.jpg" width="200"/> Open Source program</a>
 <br><br>
 <img alt="Exteso" src="https://alf.io/img/logos/exteso_logo.jpg" width="150"> &nbsp;
 <a href="https://www.starplane.it/" target="_blank">
@@ -214,7 +218,6 @@ This project is sponsored by:
 <a href="https://www.netlify.com/" target="_blank">
   <img alt="Netlify" src="https://www.netlify.com/img/global/badges/netlify-color-accent.svg" width="120">
 </a>
-
 
 ### Financial Contributors
 

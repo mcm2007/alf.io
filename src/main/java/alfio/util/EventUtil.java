@@ -33,9 +33,12 @@ import biweekly.io.text.ICalWriter;
 import biweekly.property.Method;
 import biweekly.property.Organizer;
 import biweekly.property.Status;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.RegExUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.commons.lang3.StringUtils;
+import org.flywaydb.core.api.MigrationVersion;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.web.util.UriComponentsBuilder;
 
@@ -53,12 +56,14 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static alfio.model.EventCheckInInfo.VERSION_FOR_CODE_CASE_INSENSITIVE;
 import static alfio.model.TicketFieldConfiguration.Context.ATTENDEE;
 import static alfio.model.system.ConfigurationKeys.*;
 import static java.time.temporal.ChronoField.*;
 
-@Log4j2
 public final class EventUtil {
+
+    private static final Logger log = LoggerFactory.getLogger(EventUtil.class);
 
     private EventUtil() {}
 
@@ -207,7 +212,7 @@ public final class EventUtil {
             .queryParam("ctz", event.getTimeZone())
             .queryParam("text", event.getDisplayName())
             .queryParam("location", event.getLocation())
-            .queryParam("details", description)
+            .queryParam("details", StringUtils.abbreviate(description, 1024))
             .toUriString();
     }
 
@@ -238,7 +243,7 @@ public final class EventUtil {
 
     public static Optional<String> findMatchingLink(ZoneId eventZoneId, OnlineConfiguration categoryConfiguration, OnlineConfiguration eventConfiguration) {
         return firstMatchingCallLink(eventZoneId, categoryConfiguration, eventConfiguration)
-            .map(JoinLink::getLink);
+            .map(JoinLink::link);
     }
 
     public static Optional<JoinLink> firstMatchingCallLink(ZoneId eventZoneId, OnlineConfiguration categoryConfiguration, OnlineConfiguration eventConfiguration) {
@@ -250,8 +255,8 @@ public final class EventUtil {
     private static Optional<JoinLink> firstMatchingCallLink(OnlineConfiguration onlineConfiguration, ZoneId zoneId, ZonedDateTime now) {
         return Optional.ofNullable(onlineConfiguration).stream()
             .flatMap(configuration -> configuration.getCallLinks().stream())
-            .sorted(Comparator.comparing(JoinLink::getValidFrom).reversed())
-            .filter(joinLink -> now.isBefore(joinLink.getValidTo().atZone(zoneId)) && now.plusSeconds(1).isAfter(joinLink.getValidFrom().atZone(zoneId)))
+            .sorted(Comparator.comparing(JoinLink::validFrom).reversed())
+            .filter(joinLink -> now.isBefore(joinLink.validTo().atZone(zoneId)) && now.plusSeconds(1).isAfter(joinLink.validFrom().atZone(zoneId)))
             .findFirst();
     }
 
@@ -285,5 +290,10 @@ public final class EventUtil {
         }
 
         return messagesByLang.values().stream().findFirst().orElseThrow();
+    }
+
+    public static boolean supportsCaseInsensitiveQRCode(String version) {
+        return version != null
+            && MigrationVersion.fromVersion(version).compareTo(MigrationVersion.fromVersion(VERSION_FOR_CODE_CASE_INSENSITIVE)) >= 0;
     }
 }

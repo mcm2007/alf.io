@@ -40,13 +40,13 @@ import com.paypal.http.HttpResponse;
 import com.paypal.http.exceptions.HttpException;
 import com.paypal.orders.*;
 import com.paypal.payments.CapturesRefundRequest;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.codec.digest.HmacUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.time.DateUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.util.UriComponentsBuilder;
 
@@ -58,16 +58,15 @@ import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
 
 import static alfio.model.system.ConfigurationKeys.PAYPAL_ENABLED;
 import static alfio.util.MonetaryUtil.*;
 import static org.apache.commons.collections4.CollectionUtils.emptyIfNull;
 
 @Component
-@Log4j2
-@AllArgsConstructor
 public class PayPalManager implements PaymentProvider, RefundRequest, PaymentInfo, ExtractPaymentTokenFromTransaction {
+
+    private static final Logger log = LoggerFactory.getLogger(PayPalManager.class);
 
     private final Cache<String, PayPalHttpClient> cachedClients = Caffeine.newBuilder()
         .expireAfterAccess(Duration.ofHours(1L))
@@ -78,6 +77,20 @@ public class PayPalManager implements PaymentProvider, RefundRequest, PaymentInf
     private final TransactionRepository transactionRepository;
     private final Json json;
     private final ClockProvider clockProvider;
+
+    public PayPalManager(ConfigurationManager configurationManager,
+                         TicketReservationRepository ticketReservationRepository,
+                         TicketRepository ticketRepository,
+                         TransactionRepository transactionRepository,
+                         Json json,
+                         ClockProvider clockProvider) {
+        this.configurationManager = configurationManager;
+        this.ticketReservationRepository = ticketReservationRepository;
+        this.ticketRepository = ticketRepository;
+        this.transactionRepository = transactionRepository;
+        this.json = json;
+        this.clockProvider = clockProvider;
+    }
 
     private PayPalHttpClient getClient(Configurable configurable) {
         PayPalEnvironment apiContext = getApiContext(configurable);
@@ -232,8 +245,7 @@ public class PayPalManager implements PaymentProvider, RefundRequest, PaymentInf
                 if(HttpUtils.statusCodeIsSuccessful(orderResponse.statusCode()) && orderResponse.result() != null) {
                     var order = orderResponse.result();
                     var payments = order.purchaseUnits().stream()
-                        .map(PurchaseUnit::payments)
-                        .collect(Collectors.toList());
+                        .map(PurchaseUnit::payments).toList();
 
                     var refund = payments.stream().flatMap(p -> emptyIfNull(p.refunds()).stream())
                         .map(r -> new BigDecimal(r.amount().value()))
@@ -349,7 +361,7 @@ public class PayPalManager implements PaymentProvider, RefundRequest, PaymentInf
             }
             return PaymentResult.redirect(createCheckoutRequest(spec));
         } catch (Exception e) {
-            log.error(e);
+            log.error("error while getting the token", e);
             return PaymentResult.failed( ErrorsCode.STEP_2_PAYMENT_REQUEST_CREATION );
         }
     }
@@ -413,11 +425,8 @@ public class PayPalManager implements PaymentProvider, RefundRequest, PaymentInf
         }
     }
 
-    @AllArgsConstructor
-    private static class PayPalChargeDetails {
-        private final String captureId;
-        private final String orderId;
-        private final long payPalFee;
+
+    private record PayPalChargeDetails(String captureId, String orderId, long payPalFee) {
     }
 
 }

@@ -18,19 +18,25 @@ package alfio.extension;
 
 import alfio.util.Json;
 import com.google.gson.JsonSyntaxException;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
 
 import java.util.List;
 import java.util.Map;
 
-@Getter
-@AllArgsConstructor
 public class SimpleHttpClientResponse {
     private final boolean successful;
     private final int code;
     private final Map<String, List<String>> headers;
     private final String body;
+
+    public SimpleHttpClientResponse(boolean successful,
+                                    int code,
+                                    Map<String, List<String>> headers,
+                                    String body) {
+        this.successful = successful;
+        this.code = code;
+        this.headers = headers;
+        this.body = body;
+    }
 
 
     public Object getJsonBody() {
@@ -45,11 +51,28 @@ public class SimpleHttpClientResponse {
         return tryParse(body, clazz);
     }
 
+
     private static <T> T tryParse(String body, Class<T> clazz) {
         try {
             return Json.GSON.fromJson(body, clazz);
         } catch (JsonSyntaxException jse) {
             return null;
         }
+    }
+
+    public boolean isSuccessful() {
+        return successful;
+    }
+
+    public int getCode() {
+        return code;
+    }
+
+    public Map<String, List<String>> getHeaders() {
+        return headers;
+    }
+
+    public String getBody() {
+        return body;
     }
 }

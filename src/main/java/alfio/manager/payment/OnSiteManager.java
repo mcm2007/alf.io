@@ -21,8 +21,6 @@ import alfio.manager.system.ConfigurationManager;
 import alfio.model.system.ConfigurationPathLevel;
 import alfio.model.transaction.*;
 import alfio.repository.TransactionRepository;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -36,13 +34,16 @@ import static alfio.model.system.ConfigurationKeys.ON_SITE_ENABLED;
 import static alfio.model.system.ConfigurationKeys.RECAPTCHA_API_KEY;
 
 @Component
-@Log4j2
-@AllArgsConstructor
 @Transactional
 public class OnSiteManager implements PaymentProvider {
 
     private final ConfigurationManager configurationManager;
     private final TransactionRepository transactionRepository;
+
+    public OnSiteManager(ConfigurationManager configurationManager, TransactionRepository transactionRepository) {
+        this.configurationManager = configurationManager;
+        this.transactionRepository = transactionRepository;
+    }
 
     @Override
     public Set<PaymentMethod> getSupportedPaymentMethods(PaymentContext paymentContext, TransactionRequest transactionRequest) {

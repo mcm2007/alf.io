@@ -1,8 +1,7 @@
 (function () {
     "use strict";
 
-
-    var BASE_STATIC_URL = "/resources/angular-templates/admin/partials";
+    var BASE_STATIC_URL = window.ALFIO_CONTEXT_PATH + "/resources/angular-templates/admin/partials";
 
     //
     var FIELD_TYPES = ['input:text', 'input:tel', 'textarea', 'select', 'country'];
@@ -30,6 +29,7 @@
                 template: ['<div class="container" container-fluid-responsive="">',
                                '<h1>Events</h1>',
                                '<hr />',
+                               '<export-reservations-button></export-reservations-button>',
                                '<active-events-list></active-events-list>',
                                '<expired-events-list></expired-events-list>',
                            '</div>'].join('')
@@ -222,6 +222,15 @@
                 },
                 controllerAs: 'ctrl'
             })
+            .state('events.single.paymentsList', {
+                url: '/transactions/?search',
+                template: '<payments-list purchase-context="ctrl.event" purchase-context-type="ctrl.purchaseContextType"></payments-list>',
+                controller: function(getEvent) {
+                    this.event = getEvent.data.event;
+                    this.purchaseContextType = 'event';
+                },
+                controllerAs: 'ctrl'
+            })
             .state('events.single.ticketsList', {
                 url: '/category/:categoryId/tickets',
                 template: '<tickets-list event="$ctrl.event" category-id="$ctrl.categoryId"></tickets-list>',
@@ -400,7 +409,7 @@
         $rootScope.$on('ErrorNotAuthorized', function() {
             $uibModal.open({
                 size:'sm',
-                templateUrl:'/resources/angular-templates/admin/partials/error/not-authorized.html'
+                templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/error/not-authorized.html'
             }).result.then(angular.noop, function() {
                 $state.go('index');
             });
@@ -941,6 +950,9 @@
                     $scope.event.vatIncluded = eventToCopy.vatIncluded;
                     $scope.event.allowedPaymentProxies = angular.copy(eventToCopy.allowedPaymentProxies);
                     $scope.event.format = eventToCopy.format;
+                    $scope.event.metadata = {
+                        copiedFrom: eventToCopy.shortName
+                    };
 
                     //legacy event, has all the ticket categories with ordinal 0
                     var isAllOrdinal0 = eventToCopy.ticketCategories.reduce(function(accumulator, tc) {return accumulator && (tc.ordinal === 0);}, true);
@@ -961,7 +973,10 @@
                             tokenGenerationRequested: tc.accessRestricted,
                             code: tc.code,
                             description: tc.description ? angular.copy(tc.description) : null,
-                            ticketAccessType: eventToCopy.format === 'HYBRID' ? tc.ticketAccessType : null
+                            ticketAccessType: eventToCopy.format === 'HYBRID' ? tc.ticketAccessType : null,
+                            metadata: {
+                                copiedFrom: tc.id
+                            }
                         };
 
                         if (tc.formattedValidCheckInFrom) {
@@ -1150,8 +1165,9 @@
             return token.status === 'WAITING';
         };
 
-        $scope.canBeDeleted = function(category) {
-            return category.checkedInTickets + category.soldTickets + category.pendingTickets === 0
+        $scope.canBeDeleted = function(event, category) {
+            return event.ticketCategories.length > 1
+                && category.checkedInTickets + category.soldTickets + category.pendingTickets === 0
         };
 
         $scope.deleteCategory = function(category, event) {
@@ -2047,11 +2063,14 @@
 
         $scope.registerPayment = function(eventName, id) {
             $scope.loading = true;
-            EventService.registerPayment(eventName, id).success(function() {
-                getPendingPayments(true);
-            }).error(function() {
-                $scope.loading = false;
-            });
+            EventService.registerPayment(eventName, id).then(
+                function() {
+                    getPendingPayments(true);
+                },
+                function() {
+                    $scope.loading = false;
+                }
+            );
         };
 
         $scope.showTransactionDialog = function(pendingPaymentDescriptor) {
@@ -2091,7 +2110,6 @@
         };
 
         $scope.deletePayment = function(eventName, id, credit) {
-            var action = credit ? "credit" : "cancel";
             var confirmPromise = $uibModal.open({
                 size:'md',
                 templateUrl:BASE_STATIC_URL + '/pending-payments/delete-or-credit-modal.html',
@@ -2100,18 +2118,19 @@
                     var ctrl = this;
                     ctrl.credit = credit;
                     ctrl.reservationId = id;
+                    ctrl.notify = !credit;
                     ctrl.cancel = function() {
                         $scope.$dismiss('canceled');
                     };
                     ctrl.confirm = function() {
-                        $scope.$close(true);
+                        $scope.$close(ctrl.notify);
                     };
                 },
                 controllerAs: '$ctrl'
             }).result;
 
-            confirmPromise.then(function() {
-                return EventService.cancelPayment(eventName, id, credit);
+            confirmPromise.then(function(notify) {
+                return EventService.cancelPayment(eventName, id, credit, notify);
             }).then(function() {
                 getPendingPayments(true);
             }, function() {

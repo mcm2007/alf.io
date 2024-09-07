@@ -35,6 +35,7 @@ import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.AuthorityRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.repository.user.UserRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import alfio.test.util.IntegrationTestUtil;
 import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
@@ -62,11 +63,10 @@ import java.util.UUID;
 import static alfio.test.util.IntegrationTestUtil.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class SubscriptionManagerIntegrationTest {
+class SubscriptionManagerIntegrationTest {
 
     @Autowired
     ConfigurationRepository configurationRepository;
@@ -274,6 +274,45 @@ public class SubscriptionManagerIntegrationTest {
         assertEquals(1, count);
     }
 
+    @Test
+    void updatePrice() {
+        int orgId = event.getOrganizationId();
+        assertTrue(subscriptionManager.findAll(orgId).isEmpty());
+        var request = buildSubscriptionDescriptor(orgId, null, new BigDecimal("100"), 10);
+
+        var optionalDescriptorId = subscriptionManager.createSubscriptionDescriptor(request);
+        assertTrue(optionalDescriptorId.isPresent());
+        var descriptorId = optionalDescriptorId.get();
+        var paramsMap = Map.of("descriptorId", descriptorId);
+        var count = jdbcTemplate.queryForObject("select count(*) from subscription where subscription_descriptor_fk = :descriptorId and src_price_cts = 10000", paramsMap, Integer.class);
+        assertNotNull(count);
+        assertEquals(10, count);
+
+        request = buildSubscriptionDescriptor(orgId, descriptorId, new BigDecimal("200"), 10);
+        subscriptionManager.updateSubscriptionDescriptor(request);
+        count = jdbcTemplate.queryForObject("select count(*) from subscription where subscription_descriptor_fk = :descriptorId and src_price_cts = 20000", paramsMap, Integer.class);
+        assertNotNull(count);
+        assertEquals(10, count);
+    }
+
+    @Test
+    void deactivate() {
+        int orgId = event.getOrganizationId();
+        assertTrue(subscriptionManager.findAll(orgId).isEmpty());
+        var request = buildSubscriptionDescriptor(orgId, null, new BigDecimal("100"), 10);
+
+        var optionalDescriptorId = subscriptionManager.createSubscriptionDescriptor(request);
+        assertTrue(optionalDescriptorId.isPresent());
+        var descriptorId = optionalDescriptorId.get();
+        assertTrue(subscriptionRepository.existsById(descriptorId));
+        var result = subscriptionManager.deactivateDescriptor(orgId, descriptorId);
+        assertTrue(result.isSuccess());
+        assertFalse(subscriptionRepository.existsById(descriptorId));
+        assertTrue(subscriptionRepository.findAllActiveAndPublic(ZonedDateTime.now(ClockProvider.clock()), null).isEmpty());
+        assertTrue(subscriptionManager.loadActiveSubscriptionDescriptors(orgId).isEmpty());
+        assertTrue(subscriptionRepository.findAllWithStatistics(orgId).isEmpty());
+    }
+
     private SubscriptionDescriptorModification buildSubscriptionDescriptor(int orgId, UUID id, BigDecimal price) {
         return buildSubscriptionDescriptor(orgId, id, price, 42);
     }
@@ -303,7 +342,8 @@ public class SubscriptionManagerIntegrationTest {
             null,
             fileBlobId,
             List.of(PaymentProxy.STRIPE),
-            ZoneId.of("Europe/Zurich"));
+            ZoneId.of("Europe/Zurich"),
+            false);
     }
 
 }

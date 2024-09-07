@@ -34,7 +34,7 @@
         };
     });
 
-    baseServices.service('PurchaseContextService', function(EventService, SubscriptionService) {
+    baseServices.service('PurchaseContextService', function(EventService, SubscriptionService, AdminReservationService, $http, HttpErrorHandler) {
         return {
             findAllReservations: function(type, contextName, page, search, status) {
                 if(type === 'event') {
@@ -42,9 +42,19 @@
                 } else {
                     return SubscriptionService.findAllReservations(contextName, page, search, status);
                 }
+            },
+            findAllPayments: function(type, contextName, page, search) {
+                return $http.get('/admin/api/payments/'+ type + '/' + contextName + '/list', {params: {page: page, search: search}});
+            },
+            editPaymentDetails: function(reservationId, purchaseContextType, publicIdentifier) {
+                var infoLoader = AdminReservationService.paymentInfo(purchaseContextType, publicIdentifier, reservationId);
+                return EventService.editTransactionModal(reservationId, 'edit', infoLoader, function(res) {
+                    return $http.put('/admin/api/payments/'+ purchaseContextType + '/' + publicIdentifier + '/reservation/' + reservationId, res)
+                        .error(HttpErrorHandler.handle);
+                });
             }
         };
-    })
+    });
 
     baseServices.service('EventService', function($http, HttpErrorHandler, $uibModal, $window, $rootScope, $q, LocationService, $timeout) {
 
@@ -56,6 +66,9 @@
 
         var service = {
             data: {},
+            getEventsCount: function () {
+                return $http.get('/admin/api/events-count').error(HttpErrorHandler.handle);
+            },
             getAllEvents : function() {
                 return $http.get('/admin/api/events').error(HttpErrorHandler.handle);
             },
@@ -131,7 +144,7 @@
 
                 var modal = $uibModal.open({
                     size:'md',
-                    templateUrl: '/resources/angular-templates/admin/partials/event/fragment/delete-category-modal.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/event/fragment/delete-category-modal.html',
                     backdrop: 'static',
                     controller: function($scope) {
                         $scope.cancel = function() {
@@ -170,13 +183,81 @@
             getPendingPaymentsCount: function(eventName) {
                 return $http.get('/admin/api/events/'+eventName+'/pending-payments-count').error(HttpErrorHandler.handle).then(function(res) {var v = parseInt(res.data); return isNaN(v) ? 0 : v; });
             },
-            registerPayment: function(eventName, reservationId) {
-                return $http['post']('/admin/api/events/'+eventName+'/pending-payments/'+reservationId+'/confirm').error(HttpErrorHandler.handle);
+            editTransactionModal: function(reservationId, type, transactionLoader, callback) {
+                var preloadPromise;
+                if (transactionLoader) {
+                    preloadPromise = transactionLoader.then(function(container) {
+                        var transaction = container.data.data.transaction;
+                        return {
+                            timestamp: {
+                                date: moment(transaction.timestamp).format('YYYY-MM-DD'),
+                                time: moment(transaction.timestamp).format('HH:mm')
+                            },
+                            timestampEditable: transaction.timestampEditable,
+                            notes: transaction.notes
+                        }
+                    });
+                } else {
+                    preloadPromise = $q.resolve({
+                        timestamp: {
+                            date: moment().format('YYYY-MM-DD'),
+                            time: moment().format('HH:mm')
+                        },
+                        timestampEditable: true,
+                        notes: ''
+                    });
+                }
+
+                var modal = $uibModal.open({
+                    size:'md',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/payment/edit-transaction-modal.html',
+                    backdrop: 'static',
+                    controllerAs: '$ctrl',
+                    controller: function() {
+                        var ctrl = this;
+                        ctrl.actionText = type === 'pending-payment' ? 'Confirm' : 'Edit';
+                        ctrl.confirmText = type === 'pending-payment' ? 'Confirm' : 'Save';
+                        ctrl.reservationId = reservationId;
+                        ctrl.minDate = moment().subtract(1, 'years').format('YYYY-MM-DD');
+                        ctrl.isLoading = true;
+                        preloadPromise.then(function(res) {
+                            ctrl.isLoading = false;
+                            ctrl.transaction = res;
+                        }, function(err) {
+                            modal.dismiss('error');
+                        });
+
+                        ctrl.cancel = function() {
+                            modal.dismiss('cancelled');
+                        };
+                        ctrl.confirm = function() {
+                            var result = {
+                                timestamp: ctrl.transaction.timestampEditable ? ctrl.transaction.timestamp : null,
+                                notes: ctrl.transaction.notes
+                            };
+                            if (callback) {
+                                callback(result).then(function() {
+                                    modal.close(result);
+                                });
+                            } else {
+                                modal.close(result);
+                            }
+                        }
+                    }
+                });
+                return modal.result;
             },
-            cancelPayment: function(eventName, reservationId, credit) {
+            registerPayment: function(eventName, reservationId) {
+                return service.editTransactionModal(reservationId, 'pending-payment').then(function(metadata) {
+                    return $http['post']('/admin/api/events/'+eventName+'/pending-payments/'+reservationId+'/confirm', metadata)
+                         .error(HttpErrorHandler.handle);
+                });
+            },
+            cancelPayment: function(eventName, reservationId, credit, notify) {
                 return $http['delete']('/admin/api/events/'+eventName+'/pending-payments/'+reservationId, {
                     params: {
-                        credit: credit
+                        credit: credit,
+                        notify: notify
                     }
                 }).error(HttpErrorHandler.handle);
             },
@@ -263,7 +344,7 @@
             deleteEvent: function(event) {
                 var modal = $uibModal.open({
                     size:'lg',
-                    templateUrl: '/resources/angular-templates/admin/partials/event/fragment/delete-event-modal.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/event/fragment/delete-event-modal.html',
                     backdrop: 'static',
                     controller: function($scope) {
                         $scope.cancel = function() {
@@ -284,7 +365,7 @@
             exportAttendees: function(event) {
                 var modal = $uibModal.open({
                     size:'lg',
-                    templateUrl:'/resources/angular-templates/admin/partials/event/fragment/select-field-modal.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/event/fragment/select-field-modal.html',
                     backdrop: 'static',
                     controller: function($scope) {
                         $scope.selected = {};
@@ -312,7 +393,7 @@
                             var queryString = "format="+$scope.format+"&";
                             angular.forEach($scope.selected, function(v,k) {
                                 if(v) {
-                                    queryString+="fields="+k+"&";
+                                    queryString+="fields="+ encodeURIComponent(k) +"&";
                                 }
                             });
                             var pathName = $window.location.pathname;
@@ -338,7 +419,7 @@
                         $scope.reservationId = reservationId;
                         $scope.invoiceRequested = invoiceRequested;
                         $scope.close = function() {
-                            $scope.$close(false);
+                            $scope.$dismiss(false);
                         };
 
                         $scope.success = function (result) {
@@ -369,7 +450,7 @@
             rearrangeCategories: function(event) {
                 var modal = $uibModal.open({
                     size:'lg',
-                    templateUrl:'/resources/angular-templates/admin/partials/event/rearrange-categories.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/event/rearrange-categories.html',
                     backdrop: 'static',
                     controller: function($scope) {
                         var ctrl = this;
@@ -439,7 +520,7 @@
                 return $http.get('/admin/api/events/'+eventName+'/category/'+categoryId+'/metadata').error(HttpErrorHandler.handle);
             },
             executeCapability: function(eventName, capability, parameters) {
-                return $http.post('/admin/api/events/'+eventName+'/capability/'+capability, parameters).error(HttpErrorHandler.handle);
+                return $http.post('/admin/api/events/'+eventName+'/capability/'+capability, parameters);
             }
         };
         return service;
@@ -621,20 +702,26 @@
         };
     }]);
 
-    baseServices.service("NotificationHandler", ["growl", function (growl) {
+    baseServices.service("NotificationHandler", ["growl", "$sanitize", function (growl, $sanitize) {
         var config = {ttl: 5000, disableCountDown: true};
+        var sanitize = function(message) {
+            var sanitized = $sanitize(message);
+            return sanitized.split(' ').map(function(part) {
+                return encodeURIComponent(part);
+            }).join(' ');
+        };
         return {
             showSuccess: function (message) {
-                return growl.success(message, config);
+                return growl.success(sanitize(message), config);
             },
             showWarning: function (message) {
-                return growl.warning(message, config);
+                return growl.warning(sanitize(message), config);
             },
             showInfo : function (message) {
-                return growl.info(message, config);
+                return growl.info(sanitize(message), config);
             },
             showError : function (message) {
-                return growl.error(message, config);
+                return growl.error(sanitize(message), config);
             }
         }
 
@@ -718,6 +805,13 @@
                 update: function(promoCodeId, toUpdate) {
                     addUtfOffsetIfNecessary(toUpdate);
                     return $http.post('/admin/api/promo-code/' + promoCodeId, toUpdate);
+                },
+                getUsageDetails: function(promoCodeId, eventShortName) {
+                    return $http.get('/admin/api/promo-code/' + promoCodeId + '/detailed-usage', {
+                        params: {
+                            eventShortName
+                        }
+                    });
                 }
         };
     });
@@ -864,7 +958,7 @@
                     var outCtrl = ctrl;
                     var modal = $uibModal.open({
                         size:'lg',
-                        templateUrl: '/resources/angular-templates/admin/partials/event/fragment/download-waiting-queue.html',
+                        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/angular-templates/admin/partials/event/fragment/download-waiting-queue.html',
                         backdrop: 'static',
                         controllerAs: 'ctrl',
                         controller: function($scope) {
@@ -980,8 +1074,8 @@
                     deferred.reject('Your image was not uploaded correctly.Please upload the image again');
                 } else if (!((files[0].type === 'image/png') || (files[0].type === 'image/jpeg') || (files[0].type === 'image/gif') || (files[0].type === 'image/svg+xml'))) {
                     deferred.reject('Only PNG, JPG, GIF or SVG image files are accepted');
-                } else if (files[0].size > (1024 * 200)) {
-                    deferred.reject('Image size exceeds the allowable limit 200KB');
+                } else if (files[0].size > (1024 * 1024)) {
+                    deferred.reject('Image is too big');
                 } else {
                     reader.readAsDataURL(files[0]);
                 }

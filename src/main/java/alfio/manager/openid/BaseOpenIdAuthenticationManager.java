@@ -32,8 +32,9 @@ import alfio.util.PasswordGenerator;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.Claim;
 import com.fasterxml.jackson.core.type.TypeReference;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.security.core.GrantedAuthority;
@@ -53,12 +54,16 @@ import java.util.stream.Collectors;
 import static alfio.util.HttpUtils.APPLICATION_FORM_URLENCODED;
 import static alfio.util.HttpUtils.APPLICATION_JSON;
 
-@Log4j2
 abstract class BaseOpenIdAuthenticationManager implements OpenIdAuthenticationManager {
+
+    private static final Logger log = LoggerFactory.getLogger(OpenIdAuthenticationManager.class);
+
     protected static final String CODE = "code";
     protected static final String ID_TOKEN = "id_token";
     protected static final String SUBJECT = "sub";
     protected static final String EMAIL = "email";
+    private static final String HTTPS = "https";
+    private static final String REDIRECT_URI = "redirect_uri";
 
     protected final HttpClient httpClient;
     private final UserManager userManager;
@@ -124,8 +129,8 @@ abstract class BaseOpenIdAuthenticationManager implements OpenIdAuthenticationMa
             var configuration = openIdConfiguration();
             var result = userRepository.create(user.getEmail(),
                 passwordEncoder.encode(PasswordGenerator.generateRandomPassword()),
-                retrieveClaimOrBlank(idTokenClaims, configuration.getGivenNameClaim()),
-                retrieveClaimOrBlank(idTokenClaims, configuration.getFamilyNameClaim()),
+                retrieveClaimOrBlank(idTokenClaims, configuration.givenNameClaim()),
+                retrieveClaimOrBlank(idTokenClaims, configuration.familyNameClaim()),
                 user.getEmail(),
                 true,
                 getUserType(),
@@ -215,15 +220,15 @@ abstract class BaseOpenIdAuthenticationManager implements OpenIdAuthenticationMa
 
     @Override
     public String buildAuthorizeUrl(String state) {
-        log.trace("buildAuthorizeUrl, configuration: {}", this::openIdConfiguration);
+        log.trace("buildAuthorizeUrl, configuration: {}", openIdConfiguration());
         String scopeParameter = String.join("+", getScopes());
 
         UriComponents uri = UriComponentsBuilder.newInstance()
-            .scheme("https")
-            .host(openIdConfiguration().getDomain())
-            .path(openIdConfiguration().getAuthenticationUrl())
-            .queryParam("redirect_uri", openIdConfiguration().getCallbackURI())
-            .queryParam("client_id", openIdConfiguration().getClientId())
+            .scheme(HTTPS)
+            .host(openIdConfiguration().domain())
+            .path(openIdConfiguration().authenticationUrl())
+            .queryParam(REDIRECT_URI, openIdConfiguration().callbackURI())
+            .queryParam("client_id", openIdConfiguration().clientId())
             .queryParam("state", state)
             .queryParam("scope", scopeParameter)
             .queryParam("response_type", "code")
@@ -234,9 +239,9 @@ abstract class BaseOpenIdAuthenticationManager implements OpenIdAuthenticationMa
     @Override
     public String buildClaimsRetrieverUrl() {
         UriComponents uri = UriComponentsBuilder.newInstance()
-            .scheme("https")
-            .host(openIdConfiguration().getDomain())
-            .path(openIdConfiguration().getTokenEndpoint())
+            .scheme(HTTPS)
+            .host(openIdConfiguration().domain())
+            .path(openIdConfiguration().tokenEndpoint())
             .build();
         return uri.toUriString();
     }
@@ -244,33 +249,33 @@ abstract class BaseOpenIdAuthenticationManager implements OpenIdAuthenticationMa
     @Override
     public String buildLogoutUrl() {
         UriComponents uri = UriComponentsBuilder.newInstance()
-            .scheme("https")
-            .host(openIdConfiguration().getDomain())
-            .path(openIdConfiguration().getLogoutUrl())
-            .queryParam("redirect_uri", openIdConfiguration().getLogoutRedirectUrl())
+            .scheme(HTTPS)
+            .host(openIdConfiguration().domain())
+            .path(openIdConfiguration().logoutUrl())
+            .queryParam(REDIRECT_URI, openIdConfiguration().logoutRedirectUrl())
             .build();
         return uri.toString();
     }
 
     @Override
     public String buildRetrieveClaimsUrlBody(String code) {
-        var contentType = openIdConfiguration().getContentType();
+        var contentType = openIdConfiguration().contentType();
         if (contentType.equals(APPLICATION_JSON)) {
             return buildAccessTokenUrlJson(code);
         }
         if (contentType.equals(APPLICATION_FORM_URLENCODED)) {
             return buildAccessTokenUrlForm(code);
         }
-        throw new RuntimeException("the Content-Type specified is not supported");
+        throw new OpenIdAuthenticationException("the Content-Type specified is not supported");
     }
 
     private String buildAccessTokenUrlJson(String code) {
         Map<String, String> body = Map.of(
             "grant_type", "authorization_code",
             "code", code,
-            "client_id", openIdConfiguration().getClientId(),
-            "client_secret", openIdConfiguration().getClientSecret(),
-            "redirect_uri", openIdConfiguration().getCallbackURI()
+            "client_id", openIdConfiguration().clientId(),
+            "client_secret", openIdConfiguration().clientSecret(),
+            REDIRECT_URI, openIdConfiguration().callbackURI()
         );
         return json.asJsonString(body);
     }
@@ -278,16 +283,16 @@ abstract class BaseOpenIdAuthenticationManager implements OpenIdAuthenticationMa
     private String buildAccessTokenUrlForm(String code) {
         return "grant_type=authorization_code" +
             "&code=" + code +
-            "&client_id=" + openIdConfiguration().getClientId() +
-            "&client_secret=" + openIdConfiguration().getClientSecret() +
-            "&redirect_uri=" + openIdConfiguration().getCallbackURI();
+            "&client_id=" + openIdConfiguration().clientId() +
+            "&client_secret=" + openIdConfiguration().clientSecret() +
+            "&redirect_uri=" + openIdConfiguration().callbackURI();
     }
 
     private Map<String, Object> retrieveAccessToken(String code){
         try {
             HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(buildClaimsRetrieverUrl()))
-                .header("Content-Type", openIdConfiguration().getContentType())
+                .header("Content-Type", openIdConfiguration().contentType())
                 .POST(HttpRequest.BodyPublishers.ofString(buildRetrieveClaimsUrlBody(code)))
                 .build();
 
@@ -297,11 +302,17 @@ abstract class BaseOpenIdAuthenticationManager implements OpenIdAuthenticationMa
                 return Json.fromJson(response.body(), new TypeReference<>() {});
             } else {
                 log.warn("cannot retrieve access token");
-                throw new IllegalStateException("cannot retrieve access token. Response from server: " +response.body());
+                throw new OpenIdAuthenticationException("cannot retrieve access token. Response from server: " +response.body());
             }
+        } catch(OpenIdAuthenticationException e) {
+            throw e;
+        } catch(InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Request was interrupted while retrieving access token", e);
+            throw new OpenIdAuthenticationException(e);
         } catch (Exception e) {
             log.error("There has been an error retrieving the access token from the idp using the authorization code", e);
-            throw new RuntimeException(e);
+            throw new OpenIdAuthenticationException(e);
         }
     }
 }

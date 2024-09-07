@@ -18,12 +18,13 @@ package alfio.manager.system;
 
 import alfio.model.Configurable;
 import alfio.model.system.ConfigurationKeys;
+import alfio.repository.user.OrganizationRepository;
 import alfio.util.HttpUtils;
 import alfio.util.Json;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.ArrayUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 
 import java.io.IOException;
@@ -32,20 +33,30 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.*;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-@Log4j2
-@AllArgsConstructor
-public class SendGridMailer implements Mailer {
+class SendGridMailer extends BaseMailer {
+
+    private static final Logger log = LoggerFactory.getLogger(SendGridMailer.class);
+
+    private static final String EMAIL = "email";
 
     private final HttpClient client;
-
     private final ConfigurationManager configurationManager;
+
+    SendGridMailer(HttpClient client,
+                          ConfigurationManager configurationManager,
+                          OrganizationRepository organizationRepository) {
+        super(organizationRepository);
+        this.client = client;
+        this.configurationManager = configurationManager;
+    }
 
     @Override
     public void send(Configurable configurable, final String fromName, final String to, final List<String> cc, final String subject, final String text, final Optional<String> html, final Attachment... attachment) {
-        final var config = configurationManager.getFor(Set.of(ConfigurationKeys.SENDGRID_API_KEY, ConfigurationKeys.SENDGRID_FROM, ConfigurationKeys.MAIL_REPLY_TO), configurable.getConfigurationLevel());
+        final var config = configurationManager.getFor(EnumSet.of(
+            ConfigurationKeys.SENDGRID_API_KEY, ConfigurationKeys.SENDGRID_FROM, ConfigurationKeys.MAIL_REPLY_TO, ConfigurationKeys.MAIL_SET_ORG_REPLY_TO),
+            configurable.getConfigurationLevel());
         final var from = config.get(ConfigurationKeys.SENDGRID_FROM).getRequiredValue();
         final var personalizations = createPersonalizations(to, cc, subject);
         final var contents = createContents(text, html);
@@ -53,9 +64,11 @@ public class SendGridMailer implements Mailer {
         if (ArrayUtils.isNotEmpty(attachment)) {
             addAttachments(payload, attachment);
         }
-        payload.put("from", Map.of("email", from, "name", fromName));
+        payload.put("from", Map.of(EMAIL, from, "name", fromName));
         payload.put("personalizations", personalizations);
         payload.put("content", contents);
+        setReplyToIfPresent(config, configurable.getOrganizationId(),
+            replyTo -> payload.put("reply_to", Map.of(EMAIL, replyTo)));
         //prepare request
         final var body = Json.GSON.toJson(payload);
         final var request = HttpRequest.newBuilder(URI.create("https://api.sendgrid.com/v3/mail/send"))
@@ -78,9 +91,9 @@ public class SendGridMailer implements Mailer {
 
     private List<Map<String, Object>> createPersonalizations(final String to, final List<String> cc, final String subject) {
         final var recipients = new ArrayList<>();
-        recipients.add(Map.of("email", to));
+        recipients.add(Map.of(EMAIL, to));
         if (CollectionUtils.isNotEmpty(cc)) {
-            recipients.addAll(cc.stream().map(email -> Map.of("email", email)).collect(Collectors.toList()));
+            recipients.addAll(cc.stream().map(email -> Map.of(EMAIL, email)).toList());
         }
         return List.of(Map.of("to", recipients, "subject", subject));
     }
@@ -88,15 +101,13 @@ public class SendGridMailer implements Mailer {
     private List<Map<String, String>> createContents(final String text, final Optional<String> html) {
         final var contents = new ArrayList<Map<String, String>>();
         contents.add(Map.of("type", MediaType.TEXT_PLAIN_VALUE, "value", text));
-        if (html != null) {
-            html.ifPresent(htmlContent -> contents.add(Map.of("type", MediaType.TEXT_HTML_VALUE, "value", htmlContent)));
-        }
+        Objects.requireNonNull(html).ifPresent(htmlContent -> contents.add(Map.of("type", MediaType.TEXT_HTML_VALUE, "value", htmlContent)));
         return contents;
     }
 
     private void addAttachments(final Map<String, Object> payload, final Attachment[] attachment) {
         final var attachments = Stream.of(attachment)
-            .map(attach -> Map.of("filename", attach.getFilename(), "content", attach.getSource(), "content_id", attach.getIdentifier().name(), "type", attach.getContentType())).collect(Collectors.toList());
+            .map(attach -> Map.of("filename", attach.getFilename(), "content", attach.getSource(), "content_id", attach.getIdentifier().name(), "type", attach.getContentType())).toList();
         payload.put("attachments", attachments);
     }
 }

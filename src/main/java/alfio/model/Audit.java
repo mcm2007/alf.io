@@ -59,9 +59,11 @@ public class Audit {
         TERMS_CONDITION_ACCEPTED,
         PRIVACY_POLICY_ACCEPTED,
         EXTERNAL_INVOICE_NUMBER,
+        EXTERNAL_CREDIT_NOTE_NUMBER,
         VAT_VALIDATION_SUCCESSFUL,
         VAT_FORMAL_VALIDATION_SUCCESSFUL,
         VAT_VALIDATION_SKIPPED,
+        VAT_CUSTOM_CONFIGURATION_APPLIED,
         GROUP_MEMBER_ACQUIRED,
         CREDIT_NOTE_ISSUED,
         BILLING_DATA_UPDATED,
@@ -76,7 +78,7 @@ public class Audit {
         AUTOMATIC_PAYMENT_CONFIRMATION_FAILED,
         DYNAMIC_DISCOUNT_CODE_CREATED,
         SUBSCRIPTION_ACQUIRED,
-        WARNING_IGNORED
+        UPDATE_TICKET_METADATA, WARNING_IGNORED
     }
 
     private final String reservationId;
@@ -101,7 +103,8 @@ public class Audit {
         this.eventTime = eventTime;
         this.entityType = entityType;
         this.entityId = entityId;
-        this.modifications = modifications == null ? null : Json.fromJson(modifications, new TypeReference<List<Map<String, Object>>>() {});
+        this.modifications = modifications == null ? null : Json.fromJson(modifications, new TypeReference<>() {
+        });
         this.username = username;
         this.firstName = firstName;
         this.lastName = lastName;

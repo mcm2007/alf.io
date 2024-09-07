@@ -17,8 +17,6 @@
 package alfio.util;
 
 import alfio.model.Ticket;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
 import org.apache.commons.lang3.builder.CompareToBuilder;
 import org.springframework.beans.BeanUtils;
 import org.springframework.util.ReflectionUtils;
@@ -36,7 +34,7 @@ public class ObjectDiffUtil {
     }
 
     private static String formatPropertyName(String k, String propertyNameBefore, String propertyNameAfter) {
-        return new StringBuilder(propertyNameBefore).append(k).append(propertyNameAfter).toString();
+        return propertyNameBefore + k + propertyNameAfter;
     }
 
     private static List<Change> diffUntyped(Map<String, ?> before, Map<String, ?> after, String propertyNameBefore, String propertyNameAfter) {
@@ -54,7 +52,7 @@ public class ObjectDiffUtil {
 
         removed.stream().map(k -> new Change(formatPropertyName(k, propertyNameBefore, propertyNameAfter), State.REMOVED, before.get(k), null)).forEach(changes::add);
         added.stream().map(k -> new Change(formatPropertyName(k, propertyNameBefore, propertyNameAfter), State.ADDED, null, after.get(k))).forEach(changes::add);
-        changedOrUntouched.stream().forEach(k -> {
+        changedOrUntouched.forEach(k -> {
             var beforeValue = before.get(k);
             var afterValue = after.get(k);
             if(!Objects.equals(beforeValue, afterValue)) {
@@ -66,10 +64,13 @@ public class ObjectDiffUtil {
     }
 
     public static List<Change> diff(Ticket before, Ticket after) {
+        return diff(before, after, Ticket.class);
+    }
 
+    public static <T> List<Change> diff(T before, T after, Class<T> objectType) {
         var beforeAsMap = new HashMap<String, Object>();
         var afterAsMap = new HashMap<String, Object>();
-        Stream.of(BeanUtils.getPropertyDescriptors(Ticket.class)).forEach(propertyDescriptor -> {
+        Stream.of(BeanUtils.getPropertyDescriptors(objectType)).forEach(propertyDescriptor -> {
             var method = propertyDescriptor.getReadMethod();
             var name = propertyDescriptor.getName();
             if (method != null) {
@@ -80,13 +81,34 @@ public class ObjectDiffUtil {
         return diffUntyped(beforeAsMap, afterAsMap, "/", "");
     }
 
-    @AllArgsConstructor
-    @Getter
     public static class Change implements Comparable<Change> {
         private final String propertyName;
         private final State state;
         private final Object oldValue;
         private final Object newValue;
+
+        public String getPropertyName() {
+            return propertyName;
+        }
+
+        public State getState() {
+            return state;
+        }
+
+        public Object getOldValue() {
+            return oldValue;
+        }
+
+        public Object getNewValue() {
+            return newValue;
+        }
+
+        public Change(String propertyName, State state, Object oldValue, Object newValue) {
+            this.propertyName = propertyName;
+            this.state = state;
+            this.oldValue = oldValue;
+            this.newValue = newValue;
+        }
 
         @Override
         public int compareTo(Change change) {

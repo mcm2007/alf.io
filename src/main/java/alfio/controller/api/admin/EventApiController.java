@@ -20,6 +20,7 @@ import alfio.controller.api.support.EventListItem;
 import alfio.controller.api.support.PageAndContent;
 import alfio.controller.api.support.TicketHelper;
 import alfio.controller.support.TemplateProcessor;
+import alfio.extension.exception.AlfioScriptingException;
 import alfio.manager.*;
 import alfio.manager.i18n.I18nManager;
 import alfio.manager.support.extension.ExtensionCapability;
@@ -44,16 +45,13 @@ import alfio.repository.TicketFieldRepository;
 import alfio.util.*;
 import com.opencsv.CSVReader;
 import com.opencsv.exceptions.CsvException;
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.Getter;
-import lombok.SneakyThrows;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.lang3.tuple.Triple;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -86,14 +84,13 @@ import java.util.zip.ZipOutputStream;
 import static alfio.util.Validator.*;
 import static alfio.util.Wrappers.optionally;
 import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.stream.Collectors.toList;
 import static org.apache.commons.lang3.StringUtils.defaultString;
 
 @RestController
 @RequestMapping("/admin/api")
-@Log4j2
-@AllArgsConstructor
 public class EventApiController {
+
+    private static final Logger log = LoggerFactory.getLogger(EventApiController.class);
 
     private static final String OK = "OK";
     private static final String CUSTOM_FIELDS_PREFIX = "custom:";
@@ -113,6 +110,40 @@ public class EventApiController {
     private final ConfigurationManager configurationManager;
     private final ExtensionManager extensionManager;
     private final ClockProvider clockProvider;
+
+    public EventApiController(EventManager eventManager,
+                              EventStatisticsManager eventStatisticsManager,
+                              I18nManager i18nManager,
+                              TicketReservationManager ticketReservationManager,
+                              TicketFieldRepository ticketFieldRepository,
+                              EventDescriptionRepository eventDescriptionRepository,
+                              TicketHelper ticketHelper,
+                              DynamicFieldTemplateRepository dynamicFieldTemplateRepository,
+                              UserManager userManager,
+                              SponsorScanRepository sponsorScanRepository,
+                              PaymentManager paymentManager,
+                              TemplateManager templateManager,
+                              FileUploadManager fileUploadManager,
+                              ConfigurationManager configurationManager,
+                              ExtensionManager extensionManager,
+                              ClockProvider clockProvider) {
+        this.eventManager = eventManager;
+        this.eventStatisticsManager = eventStatisticsManager;
+        this.i18nManager = i18nManager;
+        this.ticketReservationManager = ticketReservationManager;
+        this.ticketFieldRepository = ticketFieldRepository;
+        this.eventDescriptionRepository = eventDescriptionRepository;
+        this.ticketHelper = ticketHelper;
+        this.dynamicFieldTemplateRepository = dynamicFieldTemplateRepository;
+        this.userManager = userManager;
+        this.sponsorScanRepository = sponsorScanRepository;
+        this.paymentManager = paymentManager;
+        this.templateManager = templateManager;
+        this.fileUploadManager = fileUploadManager;
+        this.configurationManager = configurationManager;
+        this.extensionManager = extensionManager;
+        this.clockProvider = clockProvider;
+    }
 
 
     @ExceptionHandler(DataAccessException.class)
@@ -141,19 +172,27 @@ public class EventApiController {
     }
 
     @GetMapping(value = "/events", headers = "Authorization")
-    public List<EventListItem> getAllEventsForExternal(Principal principal, HttpServletRequest request) {
-        List<Integer> userOrganizations = userManager.findUserOrganizations(principal.getName()).stream().map(Organization::getId).collect(toList());
+    public List<EventListItem> getAllEventsForExternal(Principal principal,
+                                                       HttpServletRequest request,
+                                                       @RequestParam(value = "includeOnline", required = false, defaultValue = "false") boolean includeOnline) {
+        List<Integer> userOrganizations = userManager.findUserOrganizations(principal.getName()).stream().map(Organization::getId).toList();
         return eventManager.getActiveEvents().stream()
-            .filter(e -> userOrganizations.contains(e.getOrganizationId()))
+            .filter(e -> userOrganizations.contains(e.getOrganizationId()) && (includeOnline || e.getFormat() != Event.EventFormat.ONLINE))
             .sorted(Comparator.comparing(e -> e.getBegin().withZoneSameInstant(ZoneId.systemDefault())))
             .map(s -> new EventListItem(s, request.getContextPath(), eventDescriptionRepository.findByEventId(s.getId())))
-            .collect(toList());
+            .toList();
     }
 
     @GetMapping("/events")
     public List<EventStatistic> getAllEvents(Principal principal) {
         return eventStatisticsManager.getAllEventsWithStatistics(principal.getName());
     }
+
+    @GetMapping("/events-count")
+    public ResponseEntity<Integer> getEventsCount() {
+        return ResponseEntity.ok(eventManager.getEventsCount());
+    }
+
 
     @GetMapping("/active-events")
     public List<EventStatistic> getAllActiveEvents(Principal principal) {
@@ -169,11 +208,7 @@ public class EventApiController {
     }
 
 
-    @AllArgsConstructor
-    @Getter
-    public static class EventAndOrganization {
-        private final EventWithAdditionalInfo event;
-        private final Organization organization;
+    public record EventAndOrganization(EventWithAdditionalInfo event, Organization organization) {
     }
 
 
@@ -308,9 +343,12 @@ public class EventApiController {
         return ResponseEntity.ok(OK);
     }
 
-    private static final List<String> FIXED_FIELDS = Arrays.asList("ID", "Category", "Event", "Status", "OriginalPrice", "PaidPrice", "Discount", "VAT", "ReservationID", "Full Name", "First Name", "Last Name", "E-Mail", "Locked", "Language", "Confirmation", "Billing Address", "Country Code", "Payment ID", "Payment Method");
-    private static final List<SerializablePair<String, String>> FIXED_PAIRS = FIXED_FIELDS.stream().map(f -> SerializablePair.of(f, f)).collect(toList());
-    private static final List<String> ITALIAN_E_INVOICING_FIELDS = List.of("Fiscal Code", "Reference Type", "Addressee Code", "PEC");
+    private static final String PAYMENT_METHOD = "Payment Method";
+    private static final List<String> FIXED_FIELDS = Arrays.asList("ID", "Category", "Event", "Status", "OriginalPrice", "PaidPrice", "Discount", "VAT", "ReservationID", "Full Name", "First Name", "Last Name", "E-Mail", "Locked", "Language", "Confirmation", "Billing Address", "Country Code", "Payment ID", PAYMENT_METHOD);
+    private static final List<SerializablePair<String, String>> FIXED_PAIRS = FIXED_FIELDS.stream().map(f -> SerializablePair.of(f, f)).toList();
+    private static final String FISCAL_CODE = "Fiscal Code";
+    private static final String REFERENCE_TYPE = "Reference Type";
+    private static final List<String> ITALIAN_E_INVOICING_FIELDS = List.of(FISCAL_CODE, REFERENCE_TYPE, "Addressee Code", "PEC");
 
     @GetMapping("/events/{eventName}/export")
     public void downloadAllTicketsCSV(@PathVariable("eventName") String eventName, @RequestParam(name = "format", defaultValue = "excel") String format, HttpServletRequest request, HttpServletResponse response, Principal principal) throws IOException {
@@ -378,7 +416,7 @@ public class EventApiController {
             if(fields.contains("Billing Address")) {line.add(reservation.getBillingAddress());}
             if(fields.contains("Country Code")) {line.add(reservation.getVatCountryCode());}
             boolean paymentIdRequested = fields.contains("Payment ID");
-            boolean paymentGatewayRequested = fields.contains("Payment Method");
+            boolean paymentGatewayRequested = fields.contains(PAYMENT_METHOD);
             if((paymentIdRequested || paymentGatewayRequested)) {
                 Optional<Transaction> transaction = trs.getTransaction();
                 if(paymentIdRequested) { line.add(defaultString(transaction.map(Transaction::getPaymentId).orElse(null), transaction.map(Transaction::getTransactionId).orElse(""))); }
@@ -388,8 +426,8 @@ public class EventApiController {
             if(eInvoicingEnabled) {
                 var billingDetails = trs.getBillingDetails();
                 var optionalInvoicingData = Optional.ofNullable(billingDetails.getInvoicingAdditionalInfo()).map(TicketReservationInvoicingAdditionalInfo::getItalianEInvoicing);
-                if(fields.contains("Fiscal Code")) {line.add(optionalInvoicingData.map(ItalianEInvoicing::getFiscalCode).orElse(""));}
-                if(fields.contains("Reference Type")) {line.add(optionalInvoicingData.map(ItalianEInvoicing::getReferenceTypeAsString).orElse(""));}
+                if(fields.contains(FISCAL_CODE)) {line.add(optionalInvoicingData.map(ItalianEInvoicing::getFiscalCode).orElse(""));}
+                if(fields.contains(REFERENCE_TYPE)) {line.add(optionalInvoicingData.map(ItalianEInvoicing::getReferenceTypeAsString).orElse(""));}
                 if(fields.contains("Addressee Code")) {line.add(optionalInvoicingData.map(ItalianEInvoicing::getAddresseeCode).orElse(""));}
                 if(fields.contains("PEC")) {line.add(optionalInvoicingData.map(ItalianEInvoicing::getPec).orElse(""));}
             }
@@ -401,7 +439,7 @@ public class EventApiController {
 
             fields.stream().filter(contains.negate()).filter(f -> f.startsWith(CUSTOM_FIELDS_PREFIX)).forEachOrdered(field -> {
                 String customFieldName = field.substring(CUSTOM_FIELDS_PREFIX.length());
-                line.add(additionalValues.getOrDefault(customFieldName, "").replaceAll("\"", ""));
+                line.add(additionalValues.getOrDefault(customFieldName, "").replace("\"", ""));
             });
 
             return line.toArray(new String[0]);
@@ -419,9 +457,10 @@ public class EventApiController {
         header.add("Timestamp");
         header.add("Full name");
         header.add("Email");
-        header.addAll(fields.stream().map(TicketFieldConfiguration::getName).collect(toList()));
+        header.addAll(fields.stream().map(TicketFieldConfiguration::getName).toList());
         header.add("Sponsor notes");
         header.add("Lead Status");
+        header.add("Operator");
 
         Stream<String[]> sponsorScans = userManager.findAllEnabledUsers(principal.getName()).stream()
             .map(u -> Pair.of(u, userManager.getUserRole(u)))
@@ -432,12 +471,12 @@ public class EventApiController {
             .map(p -> {
                 DetailedScanData data = p.getLeft();
                 Map<String, String> descriptions = p.getRight();
-                return Pair.of(data, fields.stream().map(x -> descriptions.getOrDefault(x.getName(), "")).collect(toList()));
+                return Pair.of(data, fields.stream().map(x -> descriptions.getOrDefault(x.getName(), "")).toList());
             }).map(p -> {
             List<String> line = new ArrayList<>();
             Ticket ticket = p.getLeft().getTicket();
             SponsorScan sponsorScan = p.getLeft().getSponsorScan();
-            User user = userManager.findUser(sponsorScan.getUserId());
+            User user = userManager.findUser(sponsorScan.getUserId(), principal);
             line.add(user.getUsername());
             line.add(user.getDescription());
             line.add(sponsorScan.getTimestamp().toString());
@@ -448,6 +487,7 @@ public class EventApiController {
 
             line.add(sponsorScan.getNotes());
             line.add(sponsorScan.getLeadStatus().name());
+            line.add(sponsorScan.getOperator());
             return line.toArray(new String[0]);
         });
 
@@ -476,9 +516,9 @@ public class EventApiController {
         var eventAndOrganizationId = eventManager.getEventAndOrganizationId(eventName, principal.getName());
         List<SerializablePair<String, String>> fields = new ArrayList<>(FIXED_PAIRS);
         if(configurationManager.isItalianEInvoicingEnabled(eventAndOrganizationId)) {
-            fields.addAll(ITALIAN_E_INVOICING_FIELDS.stream().map(f -> SerializablePair.of(f, f)).collect(toList()));
+            fields.addAll(ITALIAN_E_INVOICING_FIELDS.stream().map(f -> SerializablePair.of(f, f)).toList());
         }
-        fields.addAll(ticketFieldRepository.findFieldsForEvent(eventName).stream().map(f -> SerializablePair.of(CUSTOM_FIELDS_PREFIX + f, f)).collect(toList()));
+        fields.addAll(ticketFieldRepository.findFieldsForEvent(eventName).stream().map(f -> SerializablePair.of(CUSTOM_FIELDS_PREFIX + f, f)).toList());
         return fields;
     }
 
@@ -487,7 +527,7 @@ public class EventApiController {
         final Map<Integer, List<TicketFieldDescription>> descById = ticketFieldRepository.findDescriptions(eventName).stream().collect(Collectors.groupingBy(TicketFieldDescription::getTicketFieldConfigurationId));
         return ticketFieldRepository.findAdditionalFieldsForEvent(eventName).stream()
             .map(field -> new TicketFieldConfigurationAndAllDescriptions(field, descById.getOrDefault(field.getId(), Collections.emptyList())))
-            .collect(toList());
+            .toList();
     }
 
     @GetMapping("/events/{eventName}/additional-field/{id}/stats")
@@ -557,9 +597,12 @@ public class EventApiController {
     }
 
     @PostMapping("/events/{eventName}/pending-payments/{reservationId}/confirm")
-    public String confirmPayment(@PathVariable("eventName") String eventName, @PathVariable("reservationId") String reservationId, Principal principal) {
+    public String confirmPayment(@PathVariable("eventName") String eventName,
+                                 @PathVariable("reservationId") String reservationId,
+                                 @RequestBody TransactionMetadataModification transactionMetadataModification,
+                                 Principal principal) {
         var event = loadEvent(eventName, principal);
-        ticketReservationManager.confirmOfflinePayment(event, reservationId, principal.getName());
+        ticketReservationManager.confirmOfflinePayment(event, reservationId, transactionMetadataModification, principal.getName());
         ticketReservationManager.findById(reservationId)
             .filter(TicketReservation::isDirectAssignmentRequested)
             .ifPresent(reservation -> {
@@ -573,8 +616,9 @@ public class EventApiController {
     public String deletePendingPayment(@PathVariable("eventName") String eventName,
                                        @PathVariable("reservationId") String reservationId,
                                        @RequestParam(required = false, value = "credit", defaultValue = "false") Boolean creditReservation,
+                                       @RequestParam(required = false, value = "notify", defaultValue = "true") Boolean notify,
                                        Principal principal) {
-        ticketReservationManager.deleteOfflinePayment(loadEvent(eventName, principal), reservationId, false, Boolean.TRUE.equals(creditReservation), principal.getName());
+        ticketReservationManager.deleteOfflinePayment(loadEvent(eventName, principal), reservationId, false, Boolean.TRUE.equals(creditReservation), notify, principal.getName());
         return OK;
     }
 
@@ -597,7 +641,7 @@ public class EventApiController {
                             return Triple.of(Boolean.FALSE, Optional.ofNullable(reservationID).orElse(""), e.getMessage());
                         }
                     })
-                    .collect(toList());
+                    .toList();
         }
     }
 
@@ -615,9 +659,9 @@ public class EventApiController {
     }
 
     @GetMapping("/events/{eventName}/invoices/count")
-    public Integer countInvoicesForEvent(@PathVariable("eventName") String eventName, Principal principal) {
+    public Integer countBillingDocumentsForEvent(@PathVariable("eventName") String eventName, Principal principal) {
         return eventManager.getOptionalEventAndOrganizationIdByName(eventName, principal.getName())
-            .map(e -> ticketReservationManager.countInvoices(e.getId()))
+            .map(e -> ticketReservationManager.countBillingDocuments(e.getId()))
             .orElse(0);
     }
 
@@ -639,29 +683,30 @@ public class EventApiController {
         }
     }
 
-    @SneakyThrows
     private void addPdfToZip(Event event, ZipOutputStream zipOS, TicketReservation reservation, BillingDocument document) {
         Map<String, Object> reservationModel = document.getModel();
         Optional<byte[]> pdf;
         var language = LocaleUtil.forLanguageTag(reservation.getUserLanguage());
 
-        switch(document.getType()) {
-            case CREDIT_NOTE:
-                pdf = TemplateProcessor.buildCreditNotePdf(event, fileUploadManager, language, templateManager, reservationModel, extensionManager);
-                break;
-            case RECEIPT:
-                pdf = TemplateProcessor.buildReceiptPdf(event, fileUploadManager, language, templateManager, reservationModel, extensionManager);
-                break;
-            default:
-                pdf = TemplateProcessor.buildInvoicePdf(event, fileUploadManager, language, templateManager, reservationModel, extensionManager);
-        }
+        pdf = switch (document.getType()) {
+            case CREDIT_NOTE ->
+                TemplateProcessor.buildCreditNotePdf(event, fileUploadManager, language, templateManager, reservationModel, extensionManager);
+            case RECEIPT ->
+                TemplateProcessor.buildReceiptPdf(event, fileUploadManager, language, templateManager, reservationModel, extensionManager);
+            default ->
+                TemplateProcessor.buildInvoicePdf(event, fileUploadManager, language, templateManager, reservationModel, extensionManager);
+        };
 
         if (pdf.isPresent()) {
             String fileName = FileUtil.getBillingDocumentFileName(event.getShortName(), reservation.getId(), document);
             var entry = new ZipEntry(fileName);
             entry.setTimeLocal(document.getGenerationTimestamp().withZoneSameInstant(event.getZoneId()).toLocalDateTime());
-            zipOS.putNextEntry(entry);
-            StreamUtils.copy(pdf.get(), zipOS);
+            try {
+                zipOS.putNextEntry(entry);
+                StreamUtils.copy(pdf.get(), zipOS);
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
         }
     }
 
@@ -679,8 +724,8 @@ public class EventApiController {
         header.add("Tax ID");
 
         if(italianEInvoicingEnabled) {
-            header.add("Fiscal Code");
-            header.add("Reference Type");
+            header.add(FISCAL_CODE);
+            header.add(REFERENCE_TYPE);
             header.add("Reference");
             header.add("Split Payment");
         }
@@ -689,7 +734,7 @@ public class EventApiController {
         header.add("Tax");
         header.add("Total");
         header.add("Currency");
-        header.add("Payment Method");
+        header.add(PAYMENT_METHOD);
         header.add("Generated on");
 
         ExportUtils.exportExcel(event.getShortName() + "-billing-documents.xlsx", "Documents", header.toArray(String[]::new),
@@ -842,22 +887,24 @@ public class EventApiController {
                                                             @PathVariable("capability") ExtensionCapability capability,
                                                             @RequestBody Map<String, String> params,
                                                             Principal principal) {
-        return ResponseEntity.of(eventManager.getOptionalByName(eventName, principal.getName())
-            .flatMap(event -> extensionManager.executeCapability(capability, params, event, String.class)));
-
+        try {
+            return ResponseEntity.of(eventManager.executeCapability(eventName, principal.getName(), capability, params));
+        } catch (AlfioScriptingException ex) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .header("Alfio-Extension-Error-Class", ex.getClass().getSimpleName())
+                .body(ex.getMessage());
+        }
     }
 
     private Event loadEvent(String eventName, Principal principal) {
         Optional<Event> singleEvent = eventManager.getOptionalByName(eventName, principal.getName());
         Validate.isTrue(singleEvent.isPresent(), "event not found");
-        return singleEvent.get();
+        return singleEvent.orElseThrow();
     }
 
-    @Data
-    static class TicketsStatistics {
-        private final String granularity;
-        private final List<TicketsByDateStatistic> sold;
-        private final List<TicketsByDateStatistic> reserved;
+    record TicketsStatistics(String granularity,
+                             List<TicketsByDateStatistic> sold,
+                             List<TicketsByDateStatistic> reserved) {
     }
 
 }

@@ -85,19 +85,29 @@
     }])
     .component('subscriptionsContainer', {
         controller: ['$stateParams', '$state', '$scope', ContainerCtrl],
-        templateUrl: '../resources/js/admin/feature/subscriptions/container.html',
+        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/subscriptions/container.html',
         bindings: { organizations: '<'}
     })
     .component('subscriptionsList', {
         controller: ['SubscriptionService', 'ConfigurationService', '$q', 'NotificationHandler', '$uibModal', SubscriptionsListCtrl],
-        templateUrl: '../resources/js/admin/feature/subscriptions/list.html',
+        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/subscriptions/list.html',
         bindings: {
             organizationId: '<'
         }
     })
     .component('singleSubscriptionContainer', {
-        controller: ['$stateParams', '$state', '$scope', function($stateParams, $state, $scope) {}],
-        templateUrl: '../resources/js/admin/feature/subscriptions/detail.html',
+        controller: ['$stateParams', '$state', '$rootScope', function($stateParams, $state, $rootScope) {
+            var ctrl = this;
+            ctrl.backToReservationList = $state.is('subscriptions.single.view-reservation');
+            var unbind = $rootScope.$on('$stateChangeSuccess', function() {
+                ctrl.backToReservationList = $state.is('subscriptions.single.view-reservation');
+            });
+            ctrl.subscriptionId = this.subscriptionDescriptor.id;
+            ctrl.$onDestroy = function() {
+                unbind();
+            }
+        }],
+        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/subscriptions/detail.html',
         bindings: {
             organizationId: '<',
             subscriptionDescriptor: '<'
@@ -105,7 +115,7 @@
     })
     .component('subscriptionsEdit', {
         controller: ['$state', 'SubscriptionService', 'EventService', 'UtilsService', '$q', 'ImageTransformService', '$scope', 'PaymentProxyService', 'PAYMENT_PROXY_DESCRIPTIONS', 'NotificationHandler', 'ConfigurationService', 'LocationService', SubscriptionsEditCtrl],
-        templateUrl: '../resources/js/admin/feature/subscriptions/edit.html',
+        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/subscriptions/edit.html',
         bindings: {
             organizationId: '<',
             subscriptionId: '<'
@@ -141,9 +151,14 @@
         var ctrl = this;
 
         ctrl.$onInit = function() {
-            $q.all([SubscriptionService.loadSubscriptionsDescriptors(ctrl.organizationId), ConfigurationService.loadSingleConfigForOrganization(ctrl.organizationId, 'BASE_URL')]).then(function(res) {
+            $q.all([
+                SubscriptionService.loadSubscriptionsDescriptors(ctrl.organizationId),
+                ConfigurationService.loadSingleConfigForOrganization(ctrl.organizationId, 'BASE_URL'),
+                ConfigurationService.loadSingleConfigForOrganization(ctrl.organizationId, 'GENERATE_TICKETS_FOR_SUBSCRIPTIONS'),
+            ]).then(function(res) {
                 ctrl.subscriptions = res[0].data;
                 ctrl.baseUrl = res[1].data;
+                ctrl.ticketsGenerationJobActive = res[2].data === 'true';
             });
         }
 
@@ -164,7 +179,7 @@
                 }
                 $uibModal.open({
                     size: 'lg',
-                    templateUrl: '../resources/js/admin/feature/subscriptions/linked-events.html',
+                    templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/subscriptions/linked-events.html',
                     controllerAs: '$ctrl',
                     backdrop: 'static',
                     controller: function($scope) {
@@ -250,7 +265,9 @@
                 EventService.getSupportedLanguages(),
                 UtilsService.getAvailableCurrencies(),
                 PaymentProxyService.getAllProxies(ctrl.organizationId),
-                LocationService.getTimezones()
+                LocationService.getTimezones(),
+                ConfigurationService.loadSingleConfigForOrganization(ctrl.organizationId, 'GENERATE_TICKETS_FOR_SUBSCRIPTIONS'),
+                ConfigurationService.loadInstanceSettings()
             ];
             if(ctrl.subscriptionId) {
                 ctrl.existing = true;
@@ -264,7 +281,8 @@
                         validityToModel: {},
                         onSaleFromModel: {},
                         onSaleToModel: {},
-                        organizationId: ctrl.organizationId
+                        organizationId: ctrl.organizationId,
+                        supportsTicketsGeneration: false
                     }
                 }));
             }
@@ -274,6 +292,8 @@
                 ctrl.currencies = res[2].data;
                 ctrl.paymentMethods = getPaymentMethods(res[3].data);
                 ctrl.timeZones = res[4].data;
+                ctrl.ticketsGenerationJobActive = res[5].data === 'true';
+                ctrl.descriptionMaxLength = res[6].data.descriptionMaxLength;
 
                 if(ctrl.existing) {
                     initExistingSubscription();
@@ -433,6 +453,9 @@
                 return $http.get('/admin/api/reservation/subscription/'+name+'/reservations/list', {params: {page: page, search: search, status: status}});
             },
             loadSubscriptionsDescriptors: function(organizationId) {
+                if (!window.USER_IS_OWNER) {
+                    return $q.reject('not authorized');
+                }
                 return $http.get('/admin/api/organization/'+organizationId+'/subscription/list')
                     .error(HttpErrorHandler.handle);
             },
@@ -531,7 +554,8 @@
                     privacyPolicyUrl: subscription.privacyPolicyUrl,
                     fileBlobId: subscription.fileBlobId,
                     paymentProxies: subscription.paymentProxies,
-                    timeZone: subscription.timeZone
+                    timeZone: subscription.timeZone,
+                    supportsTicketsGeneration: subscription.supportsTicketsGeneration
                 };
             }
         };

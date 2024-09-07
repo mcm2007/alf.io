@@ -20,21 +20,23 @@ import alfio.model.ContentLanguage;
 import alfio.model.Event;
 import alfio.model.LocalizedContent;
 import alfio.util.MustacheCustomTag;
-import lombok.experimental.UtilityClass;
-import lombok.extern.log4j.Log4j2;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSource;
 
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.function.BiConsumer;
 
-@UtilityClass
-@Log4j2
-public class Formatters {
+public final class Formatters {
+
+    private Formatters() {
+    }
+
+    private static final Logger log = LoggerFactory.getLogger(Formatters.class);
+
+    public static final String LINK_NEW_TAB_KEY = "link.new-tab";
 
     public static Map<String, String> getFormattedDate(LocalizedContent localizedContent, ZonedDateTime date, String code, MessageSource messageSource) {
         if(localizedContent != null && date != null) {
@@ -79,13 +81,18 @@ public class Formatters {
     }
 
     public static Map<String, String> applyCommonMark(Map<String, String> in) {
+        return applyCommonMark(in, null);
+    }
+
+    public static Map<String, String> applyCommonMark(Map<String, String> in, MessageSource messageSource) {
         if (in == null) {
             return Collections.emptyMap();
         }
 
         var res = new HashMap<String, String>();
         in.forEach((k, v) -> {
-            res.put(k, MustacheCustomTag.renderToHtmlCommonmarkEscaped(v));
+            var targetBlankMessage = messageSource != null ? messageSource.getMessage(LINK_NEW_TAB_KEY, null, Locale.forLanguageTag(k)) : null;
+            res.put(k, MustacheCustomTag.renderToHtmlCommonmarkEscaped(v, targetBlankMessage));
         });
         return res;
     }

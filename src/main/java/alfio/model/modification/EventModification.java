@@ -390,7 +390,7 @@ public class EventModification {
 
             private final alfio.model.AdditionalService src;
             private ZoneId zoneId;
-            private List<AdditionalField> additionalServiceFields = new ArrayList<>();
+            private final List<AdditionalField> additionalServiceFields = new ArrayList<>();
             private List<AdditionalServiceText> title = new ArrayList<>();
             private List<AdditionalServiceText> description = new ArrayList<>();
             private PriceContainer priceContainer;
@@ -448,7 +448,7 @@ public class EventModification {
         }
 
         public static AdditionalServiceText from(alfio.model.AdditionalServiceText src) {
-            return new AdditionalServiceText(src.getId(), src.getLocale(), src.getValue(), src.getType());
+            return new AdditionalServiceText(src.id(), src.locale(), src.value(), src.type());
         }
     }
 }

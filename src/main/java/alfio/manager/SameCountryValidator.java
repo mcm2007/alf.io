@@ -17,21 +17,19 @@
 package alfio.manager;
 
 import alfio.manager.system.ConfigurationManager;
-import alfio.model.Event;
-import alfio.model.EventAndOrganizationId;
 import alfio.model.PurchaseContext;
 import alfio.model.VatDetail;
 import ch.digitalfondue.vatchecker.EUVatCheckResponse;
 import ch.digitalfondue.vatchecker.EUVatChecker;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.function.Predicate;
 
-@RequiredArgsConstructor
-@Log4j2
 public class SameCountryValidator implements Predicate<String> {
+
+    private static final Logger log = LoggerFactory.getLogger(SameCountryValidator.class);
 
     private final ConfigurationManager configurationManager;
     private final ExtensionManager extensionManager;
@@ -39,6 +37,18 @@ public class SameCountryValidator implements Predicate<String> {
     private final String ticketReservationId;
     private final EuVatChecker checker;
     private final EUVatChecker client = new EUVatChecker();
+
+    public SameCountryValidator(ConfigurationManager configurationManager,
+                                ExtensionManager extensionManager,
+                                PurchaseContext purchaseContext,
+                                String ticketReservationId,
+                                EuVatChecker checker) {
+        this.configurationManager = configurationManager;
+        this.extensionManager = extensionManager;
+        this.purchaseContext = purchaseContext;
+        this.ticketReservationId = ticketReservationId;
+        this.checker = checker;
+    }
 
     @Override
     public boolean test(String vatNr) {
@@ -63,7 +73,7 @@ public class SameCountryValidator implements Predicate<String> {
         }
         if(valid && StringUtils.isNotEmpty(ticketReservationId)) {
             VatDetail detail = new VatDetail(vatNr, organizerCountry, true, "", "", validStrict ? VatDetail.Type.VIES : VatDetail.Type.FORMAL, false);
-            checker.logSuccessfulValidation(detail, ticketReservationId, purchaseContext.event().map(Event::getId).orElse(null));
+            checker.logSuccessfulValidation(detail, ticketReservationId, purchaseContext);
         }
         return valid;
     }

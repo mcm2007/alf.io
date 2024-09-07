@@ -26,7 +26,6 @@ import alfio.model.result.Result;
 import alfio.repository.*;
 import alfio.util.Json;
 import alfio.util.PinGenerator;
-import lombok.AllArgsConstructor;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
@@ -43,7 +42,6 @@ import java.util.stream.IntStream;
 import static java.util.Objects.requireNonNullElse;
 
 @Component
-@AllArgsConstructor
 @Transactional
 public class PollManager {
     private final PollRepository pollRepository;
@@ -52,6 +50,20 @@ public class PollManager {
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final TicketSearchRepository ticketSearchRepository;
     private final AuditingRepository auditingRepository;
+
+    public PollManager(PollRepository pollRepository,
+                       EventRepository eventRepository,
+                       TicketRepository ticketRepository,
+                       NamedParameterJdbcTemplate jdbcTemplate,
+                       TicketSearchRepository ticketSearchRepository,
+                       AuditingRepository auditingRepository) {
+        this.pollRepository = pollRepository;
+        this.eventRepository = eventRepository;
+        this.ticketRepository = ticketRepository;
+        this.jdbcTemplate = jdbcTemplate;
+        this.ticketSearchRepository = ticketSearchRepository;
+        this.auditingRepository = auditingRepository;
+    }
 
     public Result<List<Poll>> getActiveForEvent(String eventName, String pin) {
         return validatePinAndEvent(pin, eventName)
@@ -139,9 +151,9 @@ public class PollManager {
             .flatMap(event -> {
                 var pollId = form.getId();
                 var existingPollWithOptions = getSingleForEvent(pollId, event).orElseThrow();
-                var existingPoll = existingPollWithOptions.getPoll();
-                var tags = existingPoll.getAllowedTags();
-                if(form.isAccessRestricted() == existingPoll.getAllowedTags().isEmpty()) {
+                var existingPoll = existingPollWithOptions.poll();
+                var tags = existingPoll.allowedTags();
+                if(form.isAccessRestricted() == existingPoll.allowedTags().isEmpty()) {
                     tags = form.isAccessRestricted() ? List.of(UUID.randomUUID().toString()) : List.of();
                 }
                 Validate.isTrue(pollRepository.update(form.getTitle(), form.getDescription(), tags, form.getOrder(), pollId, event.getId()) == 1);
@@ -174,7 +186,7 @@ public class PollManager {
         Validate.isTrue(StringUtils.isNotBlank(filter));
         return eventRepository.findOptionalEventAndOrganizationIdByShortName(eventName)
             .flatMap(event -> pollRepository.findSingleForEvent(event.getId(), pollId)
-                    .map(p -> ticketSearchRepository.filterConfirmedTicketsInEventForPoll(event.getId(), 20, "%"+filter+"%", p.getAllowedTags())));
+                    .map(p -> ticketSearchRepository.filterConfirmedTicketsInEventForPoll(event.getId(), 20, "%"+filter+"%", p.allowedTags())));
     }
 
     public Optional<Boolean> allowTicketsToVote(String eventName, List<Integer> ids, long pollId) {
@@ -182,8 +194,8 @@ public class PollManager {
         return eventRepository.findOptionalEventAndOrganizationIdByShortName(eventName)
             .map(event -> {
                 var poll = pollRepository.findSingleForEvent(event.getId(), pollId).orElseThrow();
-                Validate.isTrue(CollectionUtils.isNotEmpty(poll.getAllowedTags()));
-                var tag = poll.getAllowedTags().get(0);
+                Validate.isTrue(CollectionUtils.isNotEmpty(poll.allowedTags()));
+                var tag = poll.allowedTags().get(0);
                 var result = ticketRepository.tagTickets(ids, event.getId(), tag);
                 Validate.isTrue(ids.size() == result, "Unable to tag tickets");
                 var auditingResults = auditingRepository.registerTicketTag(ids, List.of(Map.of("tag", tag)));
@@ -196,13 +208,13 @@ public class PollManager {
         return eventRepository.findOptionalEventAndOrganizationIdByShortName(eventName)
             .map(event -> {
                 var poll = pollRepository.findSingleForEvent(event.getId(), pollId).orElseThrow();
-                Validate.isTrue(CollectionUtils.isNotEmpty(poll.getAllowedTags()));
-                var tag = poll.getAllowedTags().get(0);
+                Validate.isTrue(CollectionUtils.isNotEmpty(poll.allowedTags()));
+                var tag = poll.allowedTags().get(0);
                 var result = ticketRepository.untagTickets(ticketIds, event.getId(), tag);
                 Validate.isTrue(result == 1, "Error while removing tag");
                 var auditingResults = auditingRepository.registerTicketUntag(ticketIds, List.of(Map.of("tag", tag)));
                 Validate.isTrue(auditingResults == ticketIds.size(), "Error while writing auditing");
-                return ticketRepository.getTicketsForEventByTags(event.getId(), poll.getAllowedTags());
+                return ticketRepository.getTicketsForEventByTags(event.getId(), poll.allowedTags());
             });
     }
 
@@ -211,7 +223,7 @@ public class PollManager {
             .flatMap(event -> {
                 var poll = pollRepository.findSingleForEvent(event.getId(), pollId).orElseThrow();
                 Validate.isTrue(pollRepository.deleteOption(pollId, optionId) == 1, "Error while deleting option");
-                return getSingleForEvent(poll.getId(), event);
+                return getSingleForEvent(poll.id(), event);
             });
     }
 
@@ -219,7 +231,7 @@ public class PollManager {
         return eventRepository.findOptionalEventAndOrganizationIdByShortName(eventName)
             .map(event -> {
                 var poll = pollRepository.findSingleForEvent(event.getId(), pollId).orElseThrow();
-                return ticketRepository.getTicketsForEventByTags(event.getId(), poll.getAllowedTags());
+                return ticketRepository.getTicketsForEventByTags(event.getId(), poll.allowedTags());
             });
     }
 
@@ -228,13 +240,13 @@ public class PollManager {
             .flatMap(event -> pollRepository.findSingleForEvent(event.getId(), pollId)
                 .map(p -> {
                     int allowedParticipants;
-                    if(p.getAllowedTags().isEmpty()) {
+                    if(p.allowedTags().isEmpty()) {
                         allowedParticipants = eventRepository.findStatisticsFor(event.getId()).getCheckedInTickets();
                     } else {
-                        allowedParticipants = ticketRepository.countTicketsMatchingTagsAndStatus(event.getId(), p.getAllowedTags(), List.of(Ticket.TicketStatus.CHECKED_IN.name()));
+                        allowedParticipants = ticketRepository.countTicketsMatchingTagsAndStatus(event.getId(), p.allowedTags(), List.of(Ticket.TicketStatus.CHECKED_IN.name()));
                     }
-                    var statistics = pollRepository.getStatisticsFor(p.getId(), event.getId());
-                    return new PollStatistics(statistics.stream().mapToInt(PollOptionStatistics::getVotes).sum(), allowedParticipants, statistics);
+                    var statistics = pollRepository.getStatisticsFor(p.id(), event.getId());
+                    return new PollStatistics(statistics.stream().mapToInt(PollOptionStatistics::votes).sum(), allowedParticipants, statistics);
                 }));
     }
 

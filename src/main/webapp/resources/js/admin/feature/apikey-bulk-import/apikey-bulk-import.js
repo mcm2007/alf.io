@@ -3,7 +3,7 @@
 
     angular.module('adminApplication').component('apiKeyBulkImport', {
         controller: ['$q', '$state', 'OrganizationService', 'UserService', '$timeout', BulkImportCtrl],
-        templateUrl: '../resources/js/admin/feature/apikey-bulk-import/import.html',
+        templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/apikey-bulk-import/import.html',
         bindings: {},
         require: {
             usersCtrl: '^?users'
@@ -27,7 +27,7 @@
 
             $q.all([OrganizationService.getAllOrganizations(), UserService.getAllRoles()]).then(function(results) {
                 ctrl.organizations = results[0].data;
-                ctrl.roles = _.filter(results[1].data, function(r) { return r.target === 'API_KEY'; });
+                ctrl.roles = _.filter(results[1].data, function(r) { return r.target.indexOf('API_KEY') > -1; });
             });
         };
 

@@ -76,4 +76,18 @@ public class TicketMetadata {
     public int hashCode() {
         return Objects.hash(joinLink, linkDescription, attributes);
     }
+
+    public static TicketMetadata empty() {
+        return new TicketMetadata(null, null, Map.of());
+    }
+    public TicketMetadata withAttributes(Map<String, String> attributes) {
+        return new TicketMetadata(joinLink, Map.copyOf(linkDescription), Map.copyOf(attributes));
+    }
+
+    public static TicketMetadata copyOf(TicketMetadata src) {
+        if (src != null) {
+            return new TicketMetadata(src.joinLink, Map.copyOf(src.linkDescription), Map.copyOf(src.attributes));
+        }
+        return null;
+    }
 }

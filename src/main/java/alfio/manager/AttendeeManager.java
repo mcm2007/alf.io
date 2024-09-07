@@ -29,19 +29,18 @@ import alfio.repository.*;
 import alfio.repository.user.UserRepository;
 import alfio.util.ClockProvider;
 import alfio.util.EventUtil;
-import lombok.AllArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
 @Component
-@AllArgsConstructor
 public class AttendeeManager {
 
+    public static final String DEFAULT_OPERATOR_ID = "__DEFAULT__";
     private final SponsorScanRepository sponsorScanRepository;
     private final EventRepository eventRepository;
     private final TicketRepository ticketRepository;
@@ -51,7 +50,30 @@ public class AttendeeManager {
     private final AdditionalServiceItemRepository additionalServiceItemRepository;
     private final ClockProvider clockProvider;
 
-    public TicketAndCheckInResult registerSponsorScan(String eventShortName, String ticketUid, String notes, SponsorScan.LeadStatus leadStatus, String username) {
+    public AttendeeManager(SponsorScanRepository sponsorScanRepository,
+                           EventRepository eventRepository,
+                           TicketRepository ticketRepository,
+                           UserRepository userRepository,
+                           UserManager userManager,
+                           TicketFieldRepository ticketFieldRepository,
+                           AdditionalServiceItemRepository additionalServiceItemRepository,
+                           ClockProvider clockProvider) {
+        this.sponsorScanRepository = sponsorScanRepository;
+        this.eventRepository = eventRepository;
+        this.ticketRepository = ticketRepository;
+        this.userRepository = userRepository;
+        this.userManager = userManager;
+        this.ticketFieldRepository = ticketFieldRepository;
+        this.additionalServiceItemRepository = additionalServiceItemRepository;
+        this.clockProvider = clockProvider;
+    }
+
+    public TicketAndCheckInResult registerSponsorScan(String eventShortName,
+                                                      String ticketUid,
+                                                      String notes,
+                                                      SponsorScan.LeadStatus leadStatus,
+                                                      String username,
+                                                      String operatorId) {
         int userId = userRepository.getByUsername(username).getId();
         Optional<EventAndOrganizationId> maybeEvent = eventRepository.findOptionalEventAndOrganizationIdByShortName(eventShortName);
         if(maybeEvent.isEmpty()) {
@@ -66,12 +88,13 @@ public class AttendeeManager {
         if(ticket.getStatus() != Ticket.TicketStatus.CHECKED_IN) {
             return new TicketAndCheckInResult(new TicketWithCategory(ticket, null), new DefaultCheckInResult(CheckInStatus.INVALID_TICKET_STATE, "not checked-in"));
         }
-        Optional<ZonedDateTime> existingRegistration = sponsorScanRepository.getRegistrationTimestamp(userId, event.getId(), ticket.getId());
+        var operator = Objects.requireNonNullElse(operatorId, DEFAULT_OPERATOR_ID);
+        Optional<ZonedDateTime> existingRegistration = sponsorScanRepository.getRegistrationTimestamp(userId, event.getId(), ticket.getId(), operator);
         if(existingRegistration.isEmpty()) {
             ZoneId eventZoneId = eventRepository.getZoneIdByEventId(event.getId());
-            sponsorScanRepository.insert(userId, ZonedDateTime.now(clockProvider.withZone(eventZoneId)), event.getId(), ticket.getId(), notes, leadStatus);
+            sponsorScanRepository.insert(userId, ZonedDateTime.now(clockProvider.withZone(eventZoneId)), event.getId(), ticket.getId(), notes, leadStatus, operator);
         } else {
-            sponsorScanRepository.updateNotesAndLeadStatus(userId, event.getId(), ticket.getId(), notes, leadStatus);
+            sponsorScanRepository.updateNotesAndLeadStatus(userId, event.getId(), ticket.getId(), notes, leadStatus, operator);
         }
         return new TicketAndCheckInResult(new TicketWithCategory(ticket, null), new DefaultCheckInResult(CheckInStatus.SUCCESS, "success"));
     }
@@ -107,7 +130,9 @@ public class AttendeeManager {
             .map(scan -> {
                 Ticket ticket = scan.getTicket();
                 return new SponsorAttendeeData(ticket.getUuid(), scan.getSponsorScan().getTimestamp().format(EventUtil.JSON_DATETIME_FORMATTER), ticket.getFullName(), ticket.getEmail());
-            }).collect(Collectors.toList());
+            })
+            .distinct()
+            .toList();
     }
 
 }

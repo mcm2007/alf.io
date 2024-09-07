@@ -17,6 +17,7 @@
 package alfio.repository;
 
 import alfio.model.*;
+import alfio.model.support.JSONData;
 import alfio.model.support.UserIdAndOrganizationId;
 import ch.digitalfondue.npjt.Bind;
 import ch.digitalfondue.npjt.Query;
@@ -61,7 +62,7 @@ public interface TicketReservationRepository {
                                 @Bind("lastName") String lastName,
                                 @Bind("userLanguage") String userLanguage,
                                 @Bind("billingAddress") String billingAddress,
-                                @Bind("timestamp") ZonedDateTime timestamp,
+                                @Bind("timestamp") ZonedDateTime confirmationTimestamp,
                                 @Bind("paymentMethod") String paymentMethod,
                                 @Bind("customerReference") String customerReference);
 
@@ -126,6 +127,9 @@ public interface TicketReservationRepository {
     @Query("select id from tickets_reservation where validity < :date and status = 'PENDING' for update skip locked")
     List<String> findExpiredReservationForUpdate(@Bind("date") Date date);
 
+    @Query("select distinct tr.* from tickets_reservation tr join b_transaction tx on tx.reservation_id = tr.id where tr.id in (:reservationIds) and tr.status = 'PENDING'")
+    List<TicketReservation> findReservationsWithPendingTransaction(@Bind("reservationIds") Collection<String> reservationIds);
+
     @Query("select id from tickets_reservation where validity < :date and status = 'OFFLINE_PAYMENT' for update skip locked")
     List<String> findExpiredOfflineReservationsForUpdate(@Bind("date") Date date);
 
@@ -143,9 +147,6 @@ public interface TicketReservationRepository {
 
     @Query("update tickets_reservation set invoice_number = :invoiceNumber where id = :reservationId")
     int setInvoiceNumber(@Bind("reservationId") String reservationId, @Bind("invoiceNumber") String invoiceNumber);
-
-    @Query("select count(*) from tickets_reservation where invoice_number is not null and event_id_fk = :eventId")
-    Integer countInvoices(@Bind("eventId") int eventId);
 
 
     @Query("update tickets_reservation set vat_status = :vatStatus, src_price_cts = :srcPriceCts, " +
@@ -232,6 +233,16 @@ public interface TicketReservationRepository {
         " from tickets_reservation where id = :id")
     TicketReservationAdditionalInfo getAdditionalInfo(@Bind("id") String reservationId);
 
+    @Query("select metadata from tickets_reservation where id = :id")
+    @JSONData
+    ReservationMetadata getMetadata(@Bind("id") String reservationId);
+
+    @Query("select metadata->'finalized' = 'true' as finalized from tickets_reservation where id = :id")
+    Boolean checkIfFinalized(@Bind("id") String reservationId);
+
+    @Query("update tickets_reservation set metadata = :metadata::jsonb where id = :id")
+    int setMetadata(@Bind("id") String reservationId, @Bind("metadata") @JSONData ReservationMetadata metadata);
+
     @Query("update tickets_reservation set validated_for_overview = :validated where id = :reservationId")
     int updateValidationStatus(@Bind("reservationId") String reservationId, @Bind("validated") boolean validated);
 
@@ -283,4 +294,8 @@ public interface TicketReservationRepository {
 
     @Query("select * from reservation_with_purchase_context where tr_user_id_fk = :userId order by tr_creation_ts desc")
     List<ReservationWithPurchaseContext> findAllReservationsForUser(@Bind("userId") int userId);
+
+    @Query("update tickets_reservation set vat_status = :vatStatus where id = :reservationId")
+    int updateVatStatus(@Bind("reservationId") String reservationId,
+                        @Bind("vatStatus") PriceContainer.VatStatus vatStatus);
 }

@@ -17,8 +17,8 @@
 package alfio.util;
 
 import alfio.controller.api.support.TicketHelper;
+import alfio.model.subscription.SubscriptionDescriptor;
 import com.samskivert.mustache.Mustache;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.text.StringEscapeUtils;
@@ -26,10 +26,14 @@ import org.commonmark.Extension;
 import org.commonmark.ext.gfm.tables.TablesExtension;
 import org.commonmark.node.Link;
 import org.commonmark.node.Node;
+import org.commonmark.node.Text;
 import org.commonmark.parser.Parser;
 import org.commonmark.renderer.html.AttributeProvider;
 import org.commonmark.renderer.html.HtmlRenderer;
 import org.commonmark.renderer.text.TextContentRenderer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.MessageSource;
 import org.springframework.security.web.util.UrlUtils;
 
 import java.time.ZonedDateTime;
@@ -57,8 +61,13 @@ import static org.apache.commons.lang3.StringUtils.substring;
  * <li>optional: locale:YOUR_LOCALE you can define the locale</li>
  * </ul>
  */
-@Log4j2
 public class MustacheCustomTag {
+
+    private static final Logger log = LoggerFactory.getLogger(MustacheCustomTag.class);
+
+    public static final String SUBSCRIPTION_DESCRIPTOR_ATTRIBUTE = "subscriptionDescriptor";
+
+    private MustacheCustomTag() {}
 
     private static final Pattern ARG_PATTERN = Pattern.compile("\\[(.*?)]");
     private static final String LOCALE_LABEL = "locale:";
@@ -71,6 +80,25 @@ public class MustacheCustomTag {
             out.write(DateTimeFormatter.ofPattern(p.getLeft(), p.getRight().get()).format(d));
         } else {
             out.write(DateTimeFormatter.ofPattern(p.getLeft()).format(d));
+        }
+    };
+
+    /**
+     * {{#render-markdown}}[markdown][.html|.text]{{/render-markdown}}
+     * The string must end with either .html or .text, otherwise Markdown won't be parsed
+     * e.g.
+     * {{#render-markdown}}(link)[description].html{{/render-markdown}} will produce HTML output
+     * {{#render-markdown}}(link)[description].text{{/render-markdown}} will produce text/plain output
+     */
+    static final Mustache.Lambda RENDER_MARKDOWN = (frag, out) -> {
+        String execution = frag.execute().strip();
+        if(execution.endsWith(".html")) {
+            // Markdown renderer will take care of escaping all dangerous content
+            out.write(renderToHtmlCommonmark(StringUtils.removeEnd(execution, ".html"), null));
+        } else if(execution.endsWith(".text")) {
+            out.write(renderToTextCommonmark(StringUtils.removeEnd(execution, ".text")));
+        } else {
+            out.write(execution);
         }
     };
 
@@ -95,11 +123,10 @@ public class MustacheCustomTag {
      * prefix is optional, unless a suffix is needed.
      */
     static final Function<Object, Mustache.Lambda> ADDITIONAL_FIELD_VALUE = obj -> (frag, out) -> {
-        if( !(obj instanceof Map) || ((Map<?,?>)obj).isEmpty()) {
+        if( !(obj instanceof Map<?, ?> fieldNamesAndValues) || ((Map<?,?>)obj).isEmpty()) {
             log.warn("map not found or empty. Skipping additionalFieldValue tag");
             return;
         }
-        Map<?, ?> fieldNamesAndValues = (Map<?, ?>) obj;
         String execution = frag.execute().trim();
         Matcher matcher = ARG_PATTERN.matcher(execution);
         List<String> args = new ArrayList<>();
@@ -117,6 +144,40 @@ public class MustacheCustomTag {
             out.write(prefix + fieldNamesAndValues.get(name) + suffix);
         }
     };
+
+    static Mustache.Lambda subscriptionDescriptionGenerator(MessageSource messageSource, Map<String, Object> model, Locale locale) {
+        return (frag, out) -> {
+            var subscriptionDescriptor = (SubscriptionDescriptor) Objects.requireNonNull(model.get(SUBSCRIPTION_DESCRIPTOR_ATTRIBUTE));
+            var usageType = messageSource.getMessage("subscription.usage-type." + subscriptionDescriptor.getUsageType(), null, locale);
+            switch (subscriptionDescriptor.getValidityType()) {
+                case STANDARD:
+                    var standardParams = new Object[] {
+                        subscriptionDescriptor.getValidityUnits(),
+                        messageSource.getMessage("subscription.time-unit." + subscriptionDescriptor.getValidityTimeUnit(), null, locale),
+                        usageType
+                    };
+                    out.write(messageSource.getMessage("subscription.detail.validity.STANDARD.description", standardParams, locale));
+                    break;
+                case NOT_SET:
+                    var notSetParams = new Object[] {
+                        subscriptionDescriptor.getMaxEntries(),
+                        messageSource.getMessage("subscription.usage-type." + subscriptionDescriptor.getUsageType(), null, locale),
+                        usageType
+                    };
+                    out.write(messageSource.getMessage("subscription.detail.validity.NOT_SET.description", notSetParams, locale));
+                    break;
+                case CUSTOM:
+                    var formatter = DateTimeFormatter.ofPattern(messageSource.getMessage("common.event.date-format", null, locale));
+                    out.write(messageSource.getMessage("subscription.detail.validity.CUSTOM.from", null, locale));
+                    out.write(" " + formatter.format(subscriptionDescriptor.getValidityFrom()));
+                    out.write(messageSource.getMessage("subscription.detail.validity.CUSTOM.to", null, locale));
+                    out.write(" " + formatter.format(subscriptionDescriptor.getValidityTo()));
+                    out.write(" - " + usageType);
+                    break;
+            }
+        };
+    }
+
 
     private static Pair<String, Optional<Locale>> parseParams(String r) {
 
@@ -136,27 +197,59 @@ public class MustacheCustomTag {
 
     private static final List<Extension> COMMONMARK_EXTENSIONS = List.of(TablesExtension.create());
     private static final Parser COMMONMARK_PARSER = Parser.builder().extensions(COMMONMARK_EXTENSIONS).build();
-    private static final HtmlRenderer COMMONMARK_RENDERER = HtmlRenderer.builder().extensions(COMMONMARK_EXTENSIONS).attributeProviderFactory((ctx) -> new TargetBlankProvider()).build();
+    private static final HtmlRenderer COMMONMARK_RENDERER = HtmlRenderer.builder().extensions(COMMONMARK_EXTENSIONS).attributeProviderFactory(ctx -> new TargetBlankProvider()).build();
     private static final TextContentRenderer COMMONMARK_TEXT_RENDERER = TextContentRenderer.builder().extensions(COMMONMARK_EXTENSIONS).build();
+    private static final ThreadLocal<String> A11Y_NEW_TAB_LABEL = new ThreadLocal<>();
 
     //Open in a new window if the link contains an absolute url
     private static class TargetBlankProvider implements AttributeProvider {
         @Override
         public void setAttributes(Node node, String tagName, Map<String, String> attributes) {
-            if (node instanceof Link) {
-                Link l = (Link) node;
+            if (node instanceof Link l) {
                 String destination = StringUtils.trimToEmpty(l.getDestination());
+                var scheme = getScheme(destination);
+                scheme.ifPresent(resolvedScheme -> {
+                    if (!Set.of("http", "https").contains(resolvedScheme)) {
+                        log.info("User tried to set an url with scheme {}, only http/https are accepted, href has been removed", resolvedScheme);
+                        attributes.remove("href");
+                    }
+                });
                 if (UrlUtils.isAbsoluteUrl(destination)) {
+                    // accept only http or https protocols if we have an absolute link, else we override with an empty string
                     attributes.put("target", "_blank");
                     attributes.put("rel", "nofollow noopener noreferrer");
+                    var newTabLabel = A11Y_NEW_TAB_LABEL.get();
+                    if (newTabLabel != null) {
+                        attributes.put("aria-label", ((Text)node.getFirstChild()).getLiteral() + " " + newTabLabel);
+                    }
                 }
             }
         }
     }
-
     public static String renderToHtmlCommonmarkEscaped(String input) {
-        Node document = COMMONMARK_PARSER.parse(StringEscapeUtils.escapeHtml4(input));
-        return COMMONMARK_RENDERER.render(document);
+        return renderToHtmlCommonmarkEscaped(input, null);
+    }
+
+    /**
+     * return lowercase scheme if present
+     */
+    private static Optional<String> getScheme(String uri) {
+        var s = StringUtils.trimToEmpty(uri).toLowerCase(Locale.ROOT);
+        return s.indexOf(':') >= 0 ? Optional.of(StringUtils.substringBefore(s, ':')) : Optional.empty();
+    }
+
+    public static String renderToHtmlCommonmarkEscaped(String input, String localizedNewWindowLabel) {
+        return renderToHtmlCommonmark(StringEscapeUtils.escapeHtml4(input), localizedNewWindowLabel);
+    }
+
+    private static String renderToHtmlCommonmark(String input, String localizedNewWindowLabel) {
+        try {
+            A11Y_NEW_TAB_LABEL.set(localizedNewWindowLabel);
+            Node document = COMMONMARK_PARSER.parse(input);
+            return COMMONMARK_RENDERER.render(document);
+        } finally {
+            A11Y_NEW_TAB_LABEL.remove();
+        }
     }
 
     public static String renderToTextCommonmark(String input) {

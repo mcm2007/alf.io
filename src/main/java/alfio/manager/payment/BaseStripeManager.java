@@ -41,8 +41,8 @@ import com.stripe.model.Charge;
 import com.stripe.model.Refund;
 import com.stripe.net.RequestOptions;
 import com.stripe.net.Webhook;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
 
@@ -52,9 +52,9 @@ import java.util.function.UnaryOperator;
 
 import static alfio.model.system.ConfigurationKeys.*;
 
-@Log4j2
-@AllArgsConstructor
 class BaseStripeManager {
+
+    private static final Logger log = LoggerFactory.getLogger(BaseStripeManager.class);
 
     static final String STRIPE_MANAGER_TYPE_KEY = "stripeManagerType";
     static final String SUCCEEDED = "succeeded";
@@ -74,6 +74,16 @@ class BaseStripeManager {
 
     static {
         Stripe.setAppInfo("Alf.io", "2.x", "https://alf.io");
+    }
+
+    BaseStripeManager(ConfigurationManager configurationManager,
+                      ConfigurationRepository configurationRepository,
+                      TicketRepository ticketRepository,
+                      Environment environment) {
+        this.configurationManager = configurationManager;
+        this.configurationRepository = configurationRepository;
+        this.ticketRepository = ticketRepository;
+        this.environment = environment;
     }
 
     String getSecretKey(Configurable configurable) {
@@ -110,8 +120,7 @@ class BaseStripeManager {
         try {
             com.stripe.model.Event event = Webhook.constructEvent(body, signature, getWebhookSignatureKey());
             if("account.application.deauthorized".equals(event.getType())
-                && event.getLivemode() != null
-                && event.getLivemode() == environment.acceptsProfiles(Profiles.of("dev", "test", "demo"))) {
+                && Boolean.TRUE.equals(event.getLivemode()) == environment.acceptsProfiles(Profiles.of("dev", "test", "demo"))) {
                 return Optional.of(revokeToken(event.getAccount()));
             }
             return Optional.of(true);
@@ -194,8 +203,12 @@ class BaseStripeManager {
         return PaymentResult.failed(ErrorsCode.STEP_2_MISSING_STRIPE_TOKEN);
     }
 
-    private BalanceTransaction retrieveBalanceTransaction(String balanceTransaction, RequestOptions options) throws StripeException {
+    BalanceTransaction retrieveBalanceTransaction(String balanceTransaction, RequestOptions options) throws StripeException {
         return BalanceTransaction.retrieve(balanceTransaction, options);
+    }
+
+    Charge retrieveCharge(String chargeId, RequestOptions requestOptions) throws StripeException {
+        return Charge.retrieve(chargeId, requestOptions);
     }
 
     Optional<RequestOptions> options(PurchaseContext purchaseContext) {
@@ -227,10 +240,10 @@ class BaseStripeManager {
             Optional<RequestOptions> requestOptionsOptional = options(purchaseContext);
             if(requestOptionsOptional.isPresent()) {
                 RequestOptions options = requestOptionsOptional.get();
-                Charge charge = Charge.retrieve(transaction.getTransactionId(), options);
+                Charge charge = retrieveCharge(transaction.getTransactionId(), options);
                 String paidAmount = MonetaryUtil.formatCents(charge.getAmount(), charge.getCurrency());
                 String refundedAmount = MonetaryUtil.formatCents(charge.getAmountRefunded(), charge.getCurrency());
-                List<BalanceTransaction.Fee> fees = retrieveBalanceTransaction(charge.getBalanceTransaction(), options).getFeeDetails();
+                List<BalanceTransaction.FeeDetail> fees = retrieveBalanceTransaction(charge.getBalanceTransaction(), options).getFeeDetails();
                 return Optional.of(new PaymentInformation(paidAmount, refundedAmount, getFeeAmount(fees, "stripe_fee"), getFeeAmount(fees, "application_fee")));
             }
             return Optional.empty();
@@ -239,11 +252,11 @@ class BaseStripeManager {
         }
     }
 
-    static String getFeeAmount(List<BalanceTransaction.Fee> fees, String feeType) {
+    static String getFeeAmount(List<BalanceTransaction.FeeDetail> fees, String feeType) {
         return fees.stream()
             .filter(f -> f.getType().equals(feeType))
             .findFirst()
-            .map(BalanceTransaction.Fee::getAmount)
+            .map(BalanceTransaction.FeeDetail::getAmount)
             .map(String::valueOf)
             .orElse(null);
     }

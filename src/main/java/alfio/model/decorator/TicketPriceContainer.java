@@ -19,16 +19,12 @@ package alfio.model.decorator;
 import alfio.model.PromoCodeDiscount;
 import alfio.model.SummaryPriceContainer;
 import alfio.model.Ticket;
-import lombok.AccessLevel;
-import lombok.RequiredArgsConstructor;
 import lombok.experimental.Delegate;
+import org.apache.commons.lang3.ObjectUtils;
 
 import java.math.BigDecimal;
 import java.util.Optional;
 
-import static alfio.util.MonetaryUtil.unitToCents;
-
-@RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public class TicketPriceContainer implements SummaryPriceContainer {
 
     @Delegate(excludes = OverridePriceContainer.class)
@@ -36,6 +32,16 @@ public class TicketPriceContainer implements SummaryPriceContainer {
     private final PromoCodeDiscount promoCodeDiscount;
     private final BigDecimal vatPercentage;
     private final VatStatus vatStatus;
+
+    private TicketPriceContainer(Ticket ticket,
+                                 PromoCodeDiscount promoCodeDiscount,
+                                 BigDecimal vatPercentage,
+                                 VatStatus vatStatus) {
+        this.ticket = ticket;
+        this.promoCodeDiscount = promoCodeDiscount;
+        this.vatPercentage = vatPercentage;
+        this.vatStatus = vatStatus;
+    }
 
     @Override
     public Optional<PromoCodeDiscount> getDiscount() {
@@ -55,14 +61,24 @@ public class TicketPriceContainer implements SummaryPriceContainer {
 
     public int getSummarySrcPriceCts() {
         if(VatStatus.isVatExempt(getVatStatus())) {
-            return unitToCents(getFinalPrice(), getCurrencyCode());
+            return getFinalPriceCts();
         }
         return getSrcPriceCts();
     }
 
     public static TicketPriceContainer from(Ticket t, VatStatus reservationVatStatus, BigDecimal vat, VatStatus eventVatStatus, PromoCodeDiscount discount) {
-        VatStatus vatStatus = Optional.ofNullable(reservationVatStatus).orElse(eventVatStatus);
+        VatStatus vatStatus = ObjectUtils.firstNonNull(t.getVatStatus(), reservationVatStatus, eventVatStatus);
         return new TicketPriceContainer(t, discount, vat, vatStatus);
+    }
+
+    @Override
+    public BigDecimal getTaxablePrice() {
+        if(vatStatus != VatStatus.INCLUDED_EXEMPT
+            && vatStatus != VatStatus.NOT_INCLUDED_EXEMPT
+            && vatStatus != VatStatus.CUSTOM_NOT_INCLUDED_EXEMPT) {
+            return SummaryPriceContainer.super.getTaxablePrice();
+        }
+        return BigDecimal.ZERO;
     }
 
     @Override
@@ -71,6 +87,7 @@ public class TicketPriceContainer implements SummaryPriceContainer {
     }
 
     private interface OverridePriceContainer {
+        VatStatus getVatStatus();
         int getVatCts();
         int getFinalPriceCts();
     }

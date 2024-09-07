@@ -3,8 +3,8 @@
 
     angular.module('adminApplication')
         .component('promoCodes', {
-            controller: ['$window', '$uibModal', '$q', 'PromoCodeService', 'ConfigurationService', PromoCodeCtrl],
-            templateUrl: '../resources/js/admin/feature/promo-codes/promo-codes.html',
+            controller: ['$window', '$uibModal', '$q', 'PromoCodeService', 'ConfigurationService', 'UtilsService', PromoCodeCtrl],
+            templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/promo-codes/promo-codes.html',
             bindings: {
                 forEvent: '<',
                 forOrganization: '<',
@@ -13,8 +13,8 @@
             }
         })
         .component('promoCodeList', {
-            controller: [PromoCodeListCtrl],
-            templateUrl: '../resources/js/admin/feature/promo-codes/list.html',
+            controller: ['$uibModal', 'PromoCodeService', 'NotificationHandler', PromoCodeListCtrl],
+            templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/promo-codes/list.html',
             bindings: {
                 forEvent: '<',
                 event: '<',
@@ -28,9 +28,36 @@
             }
         });
 
-    function PromoCodeListCtrl() {}
+    function PromoCodeListCtrl($uibModal, PromoCodeService, NotificationHandler) {
+        var ctrl = this;
+        ctrl.openPromoCodeDetails = openPromoCodeDetails;
 
-    function PromoCodeCtrl($window, $uibModal, $q, PromoCodeService, ConfigurationService) {
+        function openPromoCodeDetails(promoCode) {
+            PromoCodeService.getUsageDetails(promoCode.id, ctrl.event ? ctrl.event.shortName : '')
+                .then(function(result) {
+                    var data = result.data;
+                    if (data.length === 0) {
+                        NotificationHandler.showError('No reservations found.');
+                    } else {
+                        $uibModal.open({
+                            size: 'lg',
+                            templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/promo-codes/usage-details.html',
+                            backdrop: 'static',
+                            controllerAs: '$ctrl',
+                            bindToController: true,
+                            controller: function($scope) {
+                                this.data = data;
+                                this.close = function() {
+                                    $scope.$dismiss();
+                                }
+                            }
+                        });
+                    }
+                });
+        }
+    }
+
+    function PromoCodeCtrl($window, $uibModal, $q, PromoCodeService, ConfigurationService, UtilsService) {
         var ctrl = this;
 
         ctrl.isInternal = isInternal;
@@ -55,15 +82,22 @@
                 ctrl.promoCodeDescription = 'Promo';
             }
 
-            loader().then(function(res) {
-                ctrl.promocodes = res.data.filter(function(pc) {
+            $q.all([loader(), UtilsService.getAvailableCurrencies()]).then(function(results) {
+                var pcRes = results[0];
+                ctrl.currencies = results[1].data;
+                ctrl.promocodes = pcRes.data.filter(function(pc) {
                     return pc.codeType === 'DISCOUNT' || pc.codeType === 'DYNAMIC';
                 });
-                ctrl.accesscodes = res.data.filter(function(pc) {
+                ctrl.accesscodes = pcRes.data.filter(function(pc) {
                     return pc.codeType === 'ACCESS';
                 });
-                angular.forEach(ctrl.promocodes, function(v) {
+                var discountOrAccess = pcRes.data.filter(function(pc) {
+                    return pc.codeType === 'DISCOUNT' || pc.codeType === 'ACCESS';
+                });
+                angular.forEach(discountOrAccess, function(v) {
                     (function(v) {
+                        v.hasCurrency = ctrl.forEvent || v.currencyCode;
+                        v.currencyToDisplay = ctrl.forEvent ? ctrl.event.currency : v.currencyCode;
                         PromoCodeService.countUse(v.id).then(function(val) {
                             v.useCount = parseInt(val.data, 10);
                         });
@@ -105,11 +139,9 @@
         }
 
         function changeDate(promocode) {
-
-            //TODO: transform component style
             $uibModal.open({
                 size: 'lg',
-                templateUrl: '../resources/js/admin/feature/promo-codes/edit-date-promo-code-modal.html',
+                templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/promo-codes/edit-date-promo-code-modal.html',
                 backdrop: 'static',
                 controller: function($scope) {
                     $scope.cancel = function() {$scope.$dismiss('canceled');};
@@ -181,13 +213,14 @@
             //TODO: transform component style
             $uibModal.open({
                 size:'lg',
-                templateUrl: '../resources/js/admin/feature/promo-codes/edit-promo-code-modal.html',
+                templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/promo-codes/edit-promo-code-modal.html',
                 backdrop: 'static',
                 controller: function($scope) {
 
                     $scope.event = event;
                     $scope.forEvent = forEvent;
                     $scope.promoCodeDescription = ctrl.promoCodeDescription;
+                    $scope.currencies = ctrl.currencies;
 
                     var now = moment();
                     var eventBegin = forEvent ? moment(event.formattedBegin) : moment().add(1,'d').endOf('d');
@@ -216,6 +249,10 @@
                         codeType: codeType,
                         hiddenCategoryId: null
                     };
+
+                    if ($scope.forEvent) {
+                        $scope.promocode.currencyCode = $scope.event.currency;
+                    }
 
                     $scope.addCategory = function addCategory(index, value) {
                         $scope.promocode.categories[index] = value;

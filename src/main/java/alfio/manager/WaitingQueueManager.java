@@ -30,11 +30,11 @@ import alfio.repository.WaitingQueueRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.util.*;
 import ch.digitalfondue.npjt.AffectedRowCountAndKey;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.commons.lang3.tuple.Triple;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Component;
 
@@ -48,9 +48,9 @@ import static alfio.model.system.ConfigurationKeys.*;
 import static alfio.util.EventUtil.determineAvailableSeats;
 
 @Component
-@Log4j2
-@AllArgsConstructor
 public class WaitingQueueManager {
+
+    private static final Logger log = LoggerFactory.getLogger(WaitingQueueManager.class);
 
     private final WaitingQueueRepository waitingQueueRepository;
     private final TicketRepository ticketRepository;
@@ -64,6 +64,32 @@ public class WaitingQueueManager {
     private final EventRepository eventRepository;
     private final ExtensionManager extensionManager;
     private final ClockProvider clockProvider;
+
+    public WaitingQueueManager(WaitingQueueRepository waitingQueueRepository,
+                               TicketRepository ticketRepository,
+                               TicketCategoryRepository ticketCategoryRepository,
+                               ConfigurationManager configurationManager,
+                               EventStatisticsManager eventStatisticsManager,
+                               NotificationManager notificationManager,
+                               TemplateManager templateManager,
+                               MessageSourceManager messageSourceManager,
+                               OrganizationRepository organizationRepository,
+                               EventRepository eventRepository,
+                               ExtensionManager extensionManager,
+                               ClockProvider clockProvider) {
+        this.waitingQueueRepository = waitingQueueRepository;
+        this.ticketRepository = ticketRepository;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.configurationManager = configurationManager;
+        this.eventStatisticsManager = eventStatisticsManager;
+        this.notificationManager = notificationManager;
+        this.templateManager = templateManager;
+        this.messageSourceManager = messageSourceManager;
+        this.organizationRepository = organizationRepository;
+        this.eventRepository = eventRepository;
+        this.extensionManager = extensionManager;
+        this.clockProvider = clockProvider;
+    }
 
     public boolean subscribe(Event event, CustomerName customerName, String email, Integer selectedCategoryId, Locale userLanguage) {
         try {
@@ -229,7 +255,7 @@ public class WaitingQueueManager {
             .map(wq -> Pair.of(wq, tickets.next()))
             .map(pair -> {
                 TicketReservationModification ticketReservation = new TicketReservationModification();
-                ticketReservation.setAmount(1);
+                ticketReservation.setQuantity(1);
                 Integer categoryId = Optional.ofNullable(pair.getValue().getCategoryId()).orElseGet(() -> findBestCategory(unboundedCategories, pair.getKey()).orElseThrow(RuntimeException::new).getId());
                 ticketReservation.setTicketCategoryId(categoryId);
                 return Pair.of(pair.getLeft(), new TicketReservationWithOptionalCodeModification(ticketReservation, Optional.empty()));

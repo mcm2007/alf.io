@@ -17,20 +17,22 @@
 package alfio.controller.api.admin;
 
 import alfio.controller.api.support.TicketHelper;
+import alfio.job.executor.AssignTicketToSubscriberJobExecutor;
 import alfio.manager.BillingDocumentManager;
 import alfio.manager.EventManager;
 import alfio.manager.system.AdminJobExecutor;
 import alfio.manager.system.AdminJobManager;
 import alfio.manager.system.ConfigurationLevel;
 import alfio.manager.system.ConfigurationManager;
+import alfio.manager.user.UserManager;
+import alfio.model.EventAndOrganizationId;
 import alfio.model.modification.ConfigurationModification;
 import alfio.model.system.Configuration;
 import alfio.model.system.ConfigurationKeys;
-import alfio.model.user.Organization;
 import alfio.util.ClockProvider;
-import lombok.AllArgsConstructor;
-import lombok.Data;
+import alfio.util.RequestUtils;
 import org.apache.commons.lang3.tuple.Pair;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -40,12 +42,13 @@ import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static alfio.manager.system.AdminJobExecutor.JobName.ASSIGN_TICKETS_TO_SUBSCRIBERS;
 import static alfio.model.system.ConfigurationKeys.*;
 import static alfio.util.Wrappers.optionally;
+import static java.util.Objects.requireNonNullElse;
 
 @RestController
 @RequestMapping("/admin/api/configuration")
-@AllArgsConstructor
 public class ConfigurationApiController {
 
     private final ConfigurationManager configurationManager;
@@ -53,6 +56,21 @@ public class ConfigurationApiController {
     private final AdminJobManager adminJobManager;
     private final EventManager eventManager;
     private final ClockProvider clockProvider;
+    private final UserManager userManager;
+
+    public ConfigurationApiController(ConfigurationManager configurationManager,
+                                      BillingDocumentManager billingDocumentManager,
+                                      AdminJobManager adminJobManager,
+                                      EventManager eventManager,
+                                      ClockProvider clockProvider,
+                                      UserManager userManager) {
+        this.configurationManager = configurationManager;
+        this.billingDocumentManager = billingDocumentManager;
+        this.adminJobManager = adminJobManager;
+        this.eventManager = eventManager;
+        this.clockProvider = clockProvider;
+        this.userManager = userManager;
+    }
 
     @GetMapping(value = "/load")
     public Map<ConfigurationKeys.SettingCategory, List<Configuration>> loadConfiguration(Principal principal) {
@@ -237,15 +255,27 @@ public class ConfigurationApiController {
         )));
     }
 
-    @Data
-    static class OrganizationConfig {
-        private final Organization organization;
-        private final Map<ConfigurationKeys.SettingCategory, List<Configuration>> config;
+    @PutMapping("/generate-tickets-for-subscriptions")
+    public ResponseEntity<Boolean> generateTicketsForSubscriptions(@RequestParam(value = "eventId", required = false) Integer eventId,
+                                                                   @RequestParam(value = "organizationId", required = false) Integer organizationId,
+                                                                   Principal principal) {
+        boolean admin = RequestUtils.isAdmin(principal);
+        Map<String, Object> jobMetadata = null;
+
+        if(!admin && (organizationId == null || !userManager.isOwnerOfOrganization(principal.getName(), organizationId))) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        if (eventId != null && organizationId != null) {
+            eventManager.checkOwnership(new EventAndOrganizationId(eventId, organizationId), principal.getName(), organizationId);
+            jobMetadata = Map.of(AssignTicketToSubscriberJobExecutor.EVENT_ID, eventId, AssignTicketToSubscriberJobExecutor.ORGANIZATION_ID, organizationId);
+        } else if(organizationId != null) {
+            jobMetadata = Map.of(AssignTicketToSubscriberJobExecutor.ORGANIZATION_ID, organizationId);
+        }
+
+        return ResponseEntity.ok(adminJobManager.scheduleExecution(ASSIGN_TICKETS_TO_SUBSCRIBERS, requireNonNullElse(jobMetadata, Map.of())));
     }
 
-    @Data
-    static class InstanceSettings {
-        private final int descriptionMaxLength;
-        private final String baseUrl;
+    record InstanceSettings(int descriptionMaxLength, String baseUrl) {
     }
 }

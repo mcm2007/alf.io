@@ -39,6 +39,9 @@ public interface PriceContainer {
         NOT_INCLUDED(notIncludedVatCalculator, UnaryOperator.identity()),
         INCLUDED_EXEMPT(includedVatExtractor, BigDecimal::negate),
         NOT_INCLUDED_EXEMPT((price, vatPercentage) -> BigDecimal.ZERO, UnaryOperator.identity()),
+        // tax exemption was granted by custom rules (extension CUSTOM_TAX_POLICY_APPLICATION)
+        CUSTOM_INCLUDED_EXEMPT(includedVatExtractor, BigDecimal::negate),
+        CUSTOM_NOT_INCLUDED_EXEMPT((price, vatPercentage) -> BigDecimal.ZERO, UnaryOperator.identity()),
         // The following two are dedicated for handling italian-specific cases, "split payment"
         // VAT has to be shown on the invoice, but not charged
         INCLUDED_NOT_CHARGED(includedVatExtractor, UnaryOperator.identity()),
@@ -62,11 +65,19 @@ public interface PriceContainer {
         }
 
         public static boolean isVatExempt(VatStatus vatStatus) {
-            return vatStatus == INCLUDED_EXEMPT || vatStatus == NOT_INCLUDED_EXEMPT;
+            return vatStatus == INCLUDED_EXEMPT || vatStatus == NOT_INCLUDED_EXEMPT
+                || vatStatus == CUSTOM_INCLUDED_EXEMPT || vatStatus == CUSTOM_NOT_INCLUDED_EXEMPT;
         }
 
         public static boolean isVatIncluded(VatStatus vatStatus) {
-            return vatStatus == INCLUDED || vatStatus == INCLUDED_EXEMPT;
+            return vatStatus == INCLUDED || vatStatus == INCLUDED_EXEMPT || vatStatus == CUSTOM_INCLUDED_EXEMPT;
+        }
+
+        public static VatStatus forceExempt(VatStatus original) {
+            if (isVatIncluded(original)) {
+                return INCLUDED_EXEMPT;
+            }
+            return NOT_INCLUDED_EXEMPT;
         }
     }
 
@@ -122,20 +133,16 @@ public interface PriceContainer {
         }
         final BigDecimal price = centsToUnit(getSrcPriceCts(), getCurrencyCode());
         BigDecimal discountedPrice = price.subtract(getAppliedDiscount());
-        switch(vatStatus) {
-            case INCLUDED:
-            case NOT_INCLUDED_NOT_CHARGED:
-                return discountedPrice;
-            case INCLUDED_NOT_CHARGED:
-                return discountedPrice.subtract(getVAT());
-            default:
-                return discountedPrice.add(getVAT());
-        }
+        return switch (vatStatus) {
+            case INCLUDED, NOT_INCLUDED_NOT_CHARGED -> discountedPrice;
+            case INCLUDED_NOT_CHARGED -> discountedPrice.subtract(getVAT());
+            default -> discountedPrice.add(getVAT());
+        };
     }
 
     /**
      * Returns the taxable price.
-     * This is often the price itself, but it can also be a fraction of it, if some of the items are not taxable
+     * This is often the price itself, but it can also be a fraction of it, if some items are not taxable
      */
     default BigDecimal getTaxablePrice() {
         return centsToUnit(getSrcPriceCts(), getCurrencyCode()).subtract(getAppliedDiscount());
@@ -157,8 +164,8 @@ public interface PriceContainer {
     @JsonIgnore
     default BigDecimal getAppliedDiscount() {
         return getDiscount()
-            // do not take into account reservation-level discount
-            .filter(discount -> discount.getDiscountType() != PromoCodeDiscount.DiscountType.FIXED_AMOUNT_RESERVATION)
+            // do not take into account reservation-level discount or access codes
+            .filter(discount -> discount.getDiscountType() != PromoCodeDiscount.DiscountType.FIXED_AMOUNT_RESERVATION && discount.getCodeType() != PromoCodeDiscount.CodeType.ACCESS)
             .map(discount -> {
                 String currencyCode = getCurrencyCode();
                 final BigDecimal price = centsToUnit(getSrcPriceCts(), currencyCode);
@@ -176,9 +183,9 @@ public interface PriceContainer {
     default BigDecimal getNetPrice() {
         var vatStatus = getVatStatus();
         var currencyCode = getCurrencyCode();
-        if(vatStatus == VatStatus.NOT_INCLUDED_EXEMPT) {
+        if(vatStatus == VatStatus.NOT_INCLUDED_EXEMPT || vatStatus == VatStatus.CUSTOM_NOT_INCLUDED_EXEMPT) {
             return MonetaryUtil.centsToUnit(getSrcPriceCts(), currencyCode);
-        } else if(vatStatus == VatStatus.INCLUDED_EXEMPT) {
+        } else if(vatStatus == VatStatus.INCLUDED_EXEMPT || vatStatus == VatStatus.CUSTOM_INCLUDED_EXEMPT) {
             var rawVat = vatStatus.extractRawVAT(centsToUnit(getSrcPriceCts(), getCurrencyCode()), getVatPercentageOrZero());
             return MonetaryUtil.centsToUnit(getSrcPriceCts(), currencyCode).add(rawVat);
         } else if(vatStatus == VatStatus.INCLUDED || vatStatus == VatStatus.INCLUDED_NOT_CHARGED) {

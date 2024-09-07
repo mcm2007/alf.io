@@ -23,18 +23,18 @@ import alfio.manager.support.TicketAndCheckInResult;
 import alfio.manager.system.ConfigurationManager;
 import alfio.model.EventAndOrganizationId;
 import alfio.model.FullTicketInfo;
+import alfio.model.checkin.AttendeeSearchResults;
 import alfio.model.system.ConfigurationKeys;
 import alfio.util.Json;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.Data;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
 import org.apache.commons.lang3.time.DateUtils;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -46,26 +46,58 @@ import java.util.stream.Collectors;
 
 import static alfio.util.Wrappers.optionally;
 
-@Log4j2
 @RestController
 @RequestMapping("/admin/api")
-@RequiredArgsConstructor
 public class CheckInApiController {
+
+    private static final Logger log = LoggerFactory.getLogger(CheckInApiController.class);
 
     private static final String ALFIO_TIMESTAMP_HEADER = "Alfio-TIME";
     private final CheckInManager checkInManager;
     private final EventManager eventManager;
     private final ConfigurationManager configurationManager;
 
-    @Data
-    public static class TicketCode {
-        private String code;
+    public CheckInApiController(CheckInManager checkInManager,
+                                EventManager eventManager,
+                                ConfigurationManager configurationManager) {
+        this.checkInManager = checkInManager;
+        this.eventManager = eventManager;
+        this.configurationManager = configurationManager;
     }
 
-    @Data
+
+    public static class TicketCode {
+        private String code;
+
+        public String getCode() {
+            return code;
+        }
+
+        public void setCode(String code) {
+            this.code = code;
+        }
+    }
+
+
     public static class TicketIdentifierCode {
         private String identifier;
         private String code;
+
+        public String getIdentifier() {
+            return identifier;
+        }
+
+        public void setIdentifier(String identifier) {
+            this.identifier = identifier;
+        }
+
+        public String getCode() {
+            return code;
+        }
+
+        public void setCode(String code) {
+            this.code = code;
+        }
     }
     
     @GetMapping("/check-in/{eventId}/ticket/{ticketIdentifier}")
@@ -120,16 +152,32 @@ public class CheckInApiController {
     public boolean manualCheckIn(@PathVariable("eventId") int eventId,
                                  @PathVariable("ticketIdentifier") String ticketIdentifier,
                                  Principal principal) {
-        log.warn("for event id : {} and ticket : {}, a manual check in has been done", eventId, ticketIdentifier);
+        log.warn("for event id : {} and ticket : {}, a manual check in has been done by {}", eventId, ticketIdentifier, principal.getName());
         return checkInManager.manualCheckIn(eventId, ticketIdentifier, principal.getName());
+    }
+
+    @PostMapping("/check-in/event/{eventName}/ticket/{ticketIdentifier}/manual-check-in")
+    public ResponseEntity<Boolean> manualCheckIn(@PathVariable("eventName") String eventName,
+                                 @PathVariable("ticketIdentifier") String ticketIdentifier,
+                                 Principal principal) {
+        return ResponseEntity.of(eventManager.getOptionalEventAndOrganizationIdByName(eventName, principal.getName())
+            .map(ev -> manualCheckIn(ev.getId(), ticketIdentifier, principal)));
     }
 
     @PostMapping("/check-in/{eventId}/ticket/{ticketIdentifier}/revert-check-in")
     public boolean revertCheckIn(@PathVariable("eventId") int eventId,
                                  @PathVariable("ticketIdentifier") String ticketIdentifier,
                                  Principal principal) {
-        log.warn("for event id : {} and ticket : {}, a revert of the check in has been done", eventId, ticketIdentifier);
+        log.warn("for event id : {} and ticket : {}, a revert of the check in has been done by {}", eventId, ticketIdentifier, principal.getName());
         return checkInManager.revertCheckIn(eventId, ticketIdentifier, principal.getName());
+    }
+
+    @PostMapping("/check-in/event/{eventName}/ticket/{ticketIdentifier}/revert-check-in")
+    public ResponseEntity<Boolean> revertCheckIn(@PathVariable("eventName") String eventName,
+                                 @PathVariable("ticketIdentifier") String ticketIdentifier,
+                                 Principal principal) {
+        return ResponseEntity.of(eventManager.getOptionalEventAndOrganizationIdByName(eventName, principal.getName())
+            .map(ev -> revertCheckIn(ev.getId(), ticketIdentifier, principal)));
     }
 
     @PostMapping("/check-in/event/{eventName}/ticket/{ticketIdentifier}/confirm-on-site-payment")
@@ -162,6 +210,20 @@ public class CheckInApiController {
                                                Principal principal) {
         response.setHeader(ALFIO_TIMESTAMP_HEADER, Long.toString(new Date().getTime()));
         return checkInManager.getAttendeesIdentifiers(eventId, changedSince == null ? new Date(0) : new Date(changedSince), principal.getName());
+    }
+
+    @GetMapping("/check-in/event/{publicIdentifier}/attendees")
+    public ResponseEntity<AttendeeSearchResults> searchAttendees(@PathVariable("publicIdentifier") String publicIdentifier,
+                                                                 @RequestParam(value = "query", required = false) String query,
+                                                                 @RequestParam(value = "page", required = false, defaultValue = "0") int page,
+                                                                 Principal principal) {
+        if (StringUtils.isBlank(query) || StringUtils.isBlank(publicIdentifier)) {
+            return ResponseEntity.status(HttpStatus.NO_CONTENT).build();
+        }
+
+        return ResponseEntity.of(eventManager.getOptionalByName(publicIdentifier, principal.getName())
+            .map(event -> checkInManager.searchAttendees(event, query, page)));
+
     }
 
     @PostMapping("/check-in/{eventId}/tickets")
@@ -239,10 +301,8 @@ public class CheckInApiController {
             .flatMap(str -> optionally(() -> Json.fromJson(str, LabelLayout.class)));
     }
 
-    @Data
-    private static class OnSitePaymentConfirmation {
-        private final boolean status;
-        private final String message;
+
+    private record OnSitePaymentConfirmation(@JsonProperty("status") boolean status, @JsonProperty("message") String message) {
     }
 
     @Getter

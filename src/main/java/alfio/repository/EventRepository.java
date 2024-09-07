@@ -157,9 +157,6 @@ public interface EventRepository {
     @Query("update event set display_name = short_name where id = :eventId and display_name is null")
     int fillDisplayNameIfRequired(@Bind("eventId") int eventId);
 
-    @Query("select count(*) from event where short_name = :shortName")
-    Integer countByShortName(@Bind("shortName") String shortName);
-
     @Query("select id from event where end_ts > :now")
     List<Integer> findAllActiveIds(@Bind("now") ZonedDateTime now);
 
@@ -180,9 +177,13 @@ public interface EventRepository {
 
     @Query("select available_seats from events_statistics where id = :eventId")
     Integer countExistingTickets(@Bind("eventId") int eventId);
+    @Query("select count(*) from event")
+    Integer countEvents();
 
     @Query(value = "update event set status = 'DISABLED' where org_id in (select org_id from j_user_organization where user_id in (:userIds)) returning id", type = QueryType.MODIFYING_WITH_RETURN)
     List<Integer> disableEventsForUsers(@Bind("userIds") Collection<Integer> userIds);
+    @Query(value = "update event set status = 'DISABLED' where org_id = :orgId returning id", type = QueryType.MODIFYING_WITH_RETURN)
+    List<Integer> disableEventsForOrganization(@Bind("orgId") int orgId);
 
     @Query("select coalesce(sum(final_price_cts),0) from tickets_reservation where event_id_fk = :eventId and status = 'COMPLETE'")
     long getGrossIncome(@Bind("eventId") int eventId);
@@ -212,4 +213,8 @@ public interface EventRepository {
                                            @Bind("organizer") Integer organizer,
                                            @Bind("organizerSlug") String organizerSlug,
                                            @Bind("tags") List<String> tags);
+
+    @Query("select id from event where short_name in (:shortNames) and org_id = :orgId")
+    List<Integer> findIdsByShortNames(@Bind("shortNames") List<String> eventShortNames,
+                                      @Bind("orgId") int organizationId);
 }

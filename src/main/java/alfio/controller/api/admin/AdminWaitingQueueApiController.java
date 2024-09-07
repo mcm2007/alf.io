@@ -29,8 +29,6 @@ import alfio.model.system.ConfigurationKeys;
 import alfio.util.ClockProvider;
 import alfio.util.EventUtil;
 import alfio.util.ExportUtils;
-import lombok.AllArgsConstructor;
-import lombok.Data;
 import org.apache.commons.lang3.tuple.Pair;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -49,7 +47,6 @@ import static java.util.Collections.singletonList;
 
 @RestController
 @RequestMapping("/admin/api/event/{eventName}/waiting-queue")
-@AllArgsConstructor
 public class AdminWaitingQueueApiController {
 
     private final WaitingQueueManager waitingQueueManager;
@@ -58,6 +55,20 @@ public class AdminWaitingQueueApiController {
     private final ConfigurationManager configurationManager;
     private final EventStatisticsManager eventStatisticsManager;
     private final ClockProvider clockProvider;
+
+    public AdminWaitingQueueApiController(WaitingQueueManager waitingQueueManager,
+                                          EventManager eventManager,
+                                          TicketReservationManager ticketReservationManager,
+                                          ConfigurationManager configurationManager,
+                                          EventStatisticsManager eventStatisticsManager,
+                                          ClockProvider clockProvider) {
+        this.waitingQueueManager = waitingQueueManager;
+        this.eventManager = eventManager;
+        this.ticketReservationManager = ticketReservationManager;
+        this.configurationManager = configurationManager;
+        this.eventStatisticsManager = eventStatisticsManager;
+        this.clockProvider = clockProvider;
+    }
 
     @GetMapping("/status")
     public Map<String, Boolean> getStatusForEvent(@PathVariable("eventName") String eventName, Principal principal) {
@@ -168,9 +179,16 @@ public class AdminWaitingQueueApiController {
             .orElseGet(() -> new ResponseEntity<>(HttpStatus.BAD_REQUEST));
     }
 
-    @Data
     private static class SetStatusForm {
         private boolean status;
+
+        public void setStatus(boolean status) {
+            this.status = status;
+        }
+
+        public boolean isStatus() {
+            return status;
+        }
     }
 
 

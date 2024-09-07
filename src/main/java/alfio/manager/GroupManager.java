@@ -30,11 +30,11 @@ import alfio.repository.AuditingRepository;
 import alfio.repository.GroupRepository;
 import alfio.repository.TicketRepository;
 import ch.digitalfondue.npjt.AffectedRowCountAndKey;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.Validate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -49,10 +49,12 @@ import java.util.stream.Collectors;
 import static alfio.model.group.LinkedGroup.MatchType.FULL;
 import static alfio.model.group.LinkedGroup.Type.*;
 import static java.util.Collections.singletonList;
+import static org.apache.commons.text.StringEscapeUtils.escapeHtml4;
 
 @Component
-@Log4j2
 public class GroupManager {
+
+    private static final Logger log = LoggerFactory.getLogger(GroupManager.class);
 
     private final GroupRepository groupRepository;
     private final TicketRepository ticketRepository;
@@ -81,7 +83,7 @@ public class GroupManager {
     }
 
     Group createNew(String name, String description, int organizationId) {
-        AffectedRowCountAndKey<Integer> insert = groupRepository.insert(name, description, organizationId);
+        AffectedRowCountAndKey<Integer> insert = groupRepository.insert(escapeHtml4(name), escapeHtml4(description), organizationId);
         return groupRepository.getById(insert.getKey());
     }
 
@@ -130,7 +132,7 @@ public class GroupManager {
     public Optional<GroupModification> loadComplete(int id) {
         return groupRepository.getOptionalById(id)
             .map(wl -> {
-                List<GroupMemberModification> items = groupRepository.getItems(wl.getId()).stream().map(i -> new GroupMemberModification(i.getId(), i.getValue(), i.getDescription())).collect(Collectors.toList());
+                List<GroupMemberModification> items = groupRepository.getItems(wl.getId()).stream().map(i -> new GroupMemberModification(i.getId(), i.getValue(), i.getDescription())).toList();
                 return new GroupModification(wl.getId(), wl.getName(), wl.getDescription(), wl.getOrganizationId(), items);
             });
     }
@@ -164,7 +166,7 @@ public class GroupManager {
     Result<Integer> insertMembers(int groupId, List<GroupMemberModification> members) {
 
         Map<String, List<GroupMemberModification>> grouped = members.stream().collect(Collectors.groupingBy(GroupMemberModification::getValue));
-        List<String> duplicates = grouped.entrySet().stream().filter(e -> e.getValue().size() > 1).map(Map.Entry::getKey).collect(Collectors.toList());
+        List<String> duplicates = grouped.entrySet().stream().filter(e -> e.getValue().size() > 1).map(Map.Entry::getKey).toList();
 
         return new Result.Builder<Integer>()
             .checkPrecondition(duplicates::isEmpty, ErrorCode.lazy(() -> ErrorCode.custom("value.duplicate", duplicates.stream().limit(10).collect(Collectors.joining(", ")))))
@@ -215,7 +217,7 @@ public class GroupManager {
 
     @Transactional
     public void deleteWhitelistedTicketsForReservation(String reservationId) {
-        List<Integer> tickets = ticketRepository.findTicketsInReservation(reservationId).stream().map(Ticket::getId).collect(Collectors.toList());
+        List<Integer> tickets = ticketRepository.findTicketsInReservation(reservationId).stream().map(Ticket::getId).toList();
         if(!tickets.isEmpty()) {
             int result = groupRepository.deleteExistingWhitelistedTickets(tickets);
             log.trace("deleted {} whitelisted tickets for reservation {}", result, reservationId);
@@ -238,7 +240,7 @@ public class GroupManager {
         List<GroupMemberModification> notPresent = modification.getItems().stream()
             .filter(i -> i.getId() == null && !existingValues.contains(i.getValue().strip().toLowerCase()))
             .distinct()
-            .collect(Collectors.toList());
+            .toList();
 
         if(!notPresent.isEmpty()) {
             var insertResult = insertMembers(listId, notPresent);
@@ -247,7 +249,7 @@ public class GroupManager {
                 throw new DuplicateGroupItemException(error.getDescription());
             }
         }
-        groupRepository.update(listId, modification.getName(), modification.getDescription());
+        groupRepository.update(listId, escapeHtml4(modification.getName()), escapeHtml4(modification.getDescription()));
         return loadComplete(listId);
     }
 
@@ -262,7 +264,7 @@ public class GroupManager {
 
     @Transactional
     public boolean deactivateGroup(int groupId) {
-        List<Integer> members = groupRepository.getItems(groupId).stream().map(GroupMember::getId).collect(Collectors.toList());
+        List<Integer> members = groupRepository.getItems(groupId).stream().map(GroupMember::getId).toList();
         if(!members.isEmpty()) {
             Validate.isTrue(deactivateMembers(members, groupId), "error while disabling group members");
         }
@@ -271,11 +273,9 @@ public class GroupManager {
         return true;
     }
 
-    @RequiredArgsConstructor
-    public static class WhitelistValidator implements Predicate<WhitelistValidationItem> {
 
-        private final int eventId;
-        private final GroupManager groupManager;
+    public record WhitelistValidator(int eventId,
+                                     GroupManager groupManager) implements Predicate<WhitelistValidationItem> {
 
         @Override
         public boolean test(WhitelistValidationItem item) {
@@ -283,10 +283,7 @@ public class GroupManager {
         }
     }
 
-    @RequiredArgsConstructor
-    public static class WhitelistValidationItem {
-        private final int categoryId;
-        private final String value;
+    public record WhitelistValidationItem(int categoryId, String value) {
     }
 
     public static class DuplicateGroupItemException extends RuntimeException {

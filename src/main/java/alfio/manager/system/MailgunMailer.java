@@ -17,11 +17,13 @@
 package alfio.manager.system;
 
 import alfio.model.Configurable;
+import alfio.model.system.ConfigurationKeys;
+import alfio.repository.user.OrganizationRepository;
 import alfio.util.HttpUtils;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -34,15 +36,29 @@ import java.util.stream.Stream;
 
 import static alfio.model.system.ConfigurationKeys.*;
 
-@Log4j2
-@AllArgsConstructor
-class MailgunMailer implements Mailer {
+class MailgunMailer extends BaseMailer {
+
+    private static final Logger log = LoggerFactory.getLogger(MailgunMailer.class);
 
     private final HttpClient client;
     private final ConfigurationManager configurationManager;
 
+    MailgunMailer(HttpClient client,
+                  ConfigurationManager configurationManager,
+                  OrganizationRepository organizationRepository) {
+        super(organizationRepository);
+        this.client = client;
+        this.configurationManager = configurationManager;
+    }
 
-    private static Map<String, String> getEmailData(String from, String to, String replyTo, List<String> cc, String subject, String text, Optional<String> html) {
+
+
+    private static Map<String, String> getEmailData(String from,
+                                                    String to,
+                                                    List<String> cc,
+                                                    String subject,
+                                                    String text,
+                                                    Optional<String> html) {
         Map<String, String> emailData = new HashMap<>(Map.of(
             "from", from,
             "to", to,
@@ -53,9 +69,6 @@ class MailgunMailer implements Mailer {
         if(cc != null && !cc.isEmpty()) {
             emailData.put("cc", StringUtils.join(cc, ','));
         }
-        if(StringUtils.isNoneBlank(replyTo)) {
-            emailData.put("h:Reply-To", replyTo);
-        }
         html.ifPresent(htmlContent -> emailData.put("html", htmlContent));
         return emailData;
     }
@@ -64,7 +77,15 @@ class MailgunMailer implements Mailer {
     public void send(Configurable configurable, String fromName, String to, List<String> cc, String subject, String text,
                      Optional<String> html, Attachment... attachment) {
 
-        var conf = configurationManager.getFor(Set.of(MAILGUN_KEY, MAILGUN_DOMAIN, MAILGUN_EU, MAILGUN_FROM, MAIL_REPLY_TO), configurable.getConfigurationLevel());
+        var conf = configurationManager.getFor(
+            Set.of(
+                MAILGUN_KEY,
+                MAILGUN_DOMAIN,
+                MAILGUN_EU,
+                MAILGUN_FROM,
+                MAIL_REPLY_TO,
+                MAIL_SET_ORG_REPLY_TO),
+            configurable.getConfigurationLevel());
 
         String apiKey = conf.get(MAILGUN_KEY).getRequiredValue();
         String domain = conf.get(MAILGUN_DOMAIN).getRequiredValue();
@@ -75,9 +96,10 @@ class MailgunMailer implements Mailer {
 
             var from = fromName + " <" + conf.get(MAILGUN_FROM).getRequiredValue() +">";
 
-            var replyTo = conf.get(MAIL_REPLY_TO).getValueOrDefault("");
+            var emailData = getEmailData(from, to, cc, subject, text, html);
 
-            var emailData = getEmailData(from, to, replyTo, cc, subject, text, html);
+            setReplyToIfPresent(conf, configurable.getOrganizationId(),
+                replyTo -> emailData.put("h:Reply-To", replyTo));
 
             var requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + domain + "/messages"))
@@ -89,7 +111,7 @@ class MailgunMailer implements Mailer {
             } else {
                 var mpb = new HttpUtils.MultiPartBodyPublisher();
                 requestBuilder.header(HttpUtils.CONTENT_TYPE, HttpUtils.MULTIPART_FORM_DATA+";boundary=\""+mpb.getBoundary()+"\"");
-                emailData.forEach((k, v) -> mpb.addPart(k, v));
+                emailData.forEach(mpb::addPart);
                 Stream.of(attachment).forEach(a -> mpb.addPart("attachment", () -> new ByteArrayInputStream(a.getSource()), a.getFilename(), a.getContentType()));
                 requestBuilder.POST(mpb.build());
             }
@@ -101,8 +123,13 @@ class MailgunMailer implements Mailer {
                 log.warn("sending email was not successful:" + response);
                 throw new IllegalStateException("Attempt to send a message failed. Result is: "+response.statusCode());
             }
-        } catch (IOException | InterruptedException e) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Request interrupted while calling Mailgun API", e);
+            throw new IllegalStateException(e);
+        } catch (IOException e) {
             log.warn("error while sending email", e);
+            throw new IllegalStateException(e);
         }
     }
 }

@@ -23,7 +23,9 @@ import alfio.manager.system.ConfigurationLevel;
 import alfio.manager.system.ConfigurationManager;
 import alfio.manager.user.UserManager;
 import alfio.model.Event;
+import alfio.model.PurchaseContext;
 import alfio.model.TicketCategory;
+import alfio.model.TicketReservation;
 import alfio.model.metadata.AlfioMetadata;
 import alfio.model.modification.ConfigurationModification;
 import alfio.model.modification.DateTimeModification;
@@ -39,10 +41,12 @@ import alfio.model.user.User;
 import alfio.repository.TicketCategoryRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
+import alfio.test.util.AlfioIntegrationTest;
 import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -58,13 +62,14 @@ import java.util.stream.Collectors;
 
 import static alfio.model.system.ConfigurationKeys.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
+class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
 
     public static final String USERNAME = "test";
 
@@ -90,20 +95,25 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     private TicketCategoryRepository ticketCategoryRepository;
 
     @BeforeEach
-    public void prepareEnv() {
+    void prepareEnv() {
         //setup...
         organizationRepository.create("org", "org", "email@example.com", null, null);
-        Organization organization = organizationRepository.findByName("org").get();
+        Organization organization = organizationRepository.findByName("org").orElseThrow();
 
-        userManager.insertUser(organization.getId(), USERNAME, "test", "test", "test@example.com", Role.OWNER, User.Type.INTERNAL);
+        userManager.insertUser(organization.getId(), USERNAME, "test", "test", "test@example.com", Role.OWNER, User.Type.INTERNAL, null);
 
         Map<String, String> desc = new HashMap<>();
         desc.put("en", "muh description");
         desc.put("it", "muh description");
         desc.put("de", "muh description");
 
-        List<TicketCategoryModification> ticketsCategory = Collections.singletonList(
+        List<TicketCategoryModification> ticketsCategory = List.of(
             new TicketCategoryModification(null, "default", TicketCategory.TicketAccessType.INHERIT, 20,
+                new DateTimeModification(LocalDate.now(ClockProvider.clock()), LocalTime.now(ClockProvider.clock())),
+                new DateTimeModification(LocalDate.now(ClockProvider.clock()), LocalTime.now(ClockProvider.clock())),
+                Collections.singletonMap("en", "desc"), BigDecimal.TEN, false, "", false, null, null,
+                null, null, null, 0, null, null, AlfioMetadata.empty()),
+            new TicketCategoryModification(null, "second", TicketCategory.TicketAccessType.INHERIT, 20,
                 new DateTimeModification(LocalDate.now(ClockProvider.clock()), LocalTime.now(ClockProvider.clock())),
                 new DateTimeModification(LocalDate.now(ClockProvider.clock()), LocalTime.now(ClockProvider.clock())),
                 Collections.singletonMap("en", "desc"), BigDecimal.TEN, false, "", false, null, null,
@@ -121,33 +131,33 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testPresentStringConfigValue() {
+    void testPresentStringConfigValue() {
         assertEquals(Optional.of("5"), configurationManager.getFor(MAX_AMOUNT_OF_TICKETS_BY_RESERVATION, ConfigurationLevel.event(event)).getValue());
     }
 
     @Test
-    public void testEmptyStringConfigValue() {
+    void testEmptyStringConfigValue() {
         assertTrue(configurationManager.getFor(SMTP_PASSWORD, ConfigurationLevel.event(event)).getValue().isEmpty());
     }
 
     @Test
-    public void testStringValueWithDefault() {
+    void testStringValueWithDefault() {
         assertEquals("5", configurationManager.getFor(MAX_AMOUNT_OF_TICKETS_BY_RESERVATION, ConfigurationLevel.event(event)).getRequiredValue());
         assertEquals("-1", configurationManager.getFor(SMTP_PASSWORD, ConfigurationLevel.event(event)).getValueOrDefault("-1"));
     }
 
     @Test
-    public void testMissingConfigValue() {
+    void testMissingConfigValue() {
         assertThrows(IllegalArgumentException.class, () -> configurationManager.getFor(SMTP_PASSWORD, ConfigurationLevel.event(event)).getRequiredValue());
     }
 
     @Test
-    public void testRequiredValue() {
+    void testRequiredValue() {
         assertEquals("5", configurationManager.getFor(MAX_AMOUNT_OF_TICKETS_BY_RESERVATION, ConfigurationLevel.event(event)).getRequiredValue());
     }
 
     @Test
-    public void testIntValue() {
+    void testIntValue() {
         assertEquals(5, configurationManager.getFor(MAX_AMOUNT_OF_TICKETS_BY_RESERVATION, ConfigurationLevel.event(event)).getValueAsIntOrDefault(-1));
 
         //missing value
@@ -161,7 +171,7 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testBooleanValue() {
+    void testBooleanValue() {
         //missing value
         assertFalse(configurationManager.getFor(ALLOW_FREE_TICKETS_CANCELLATION, ConfigurationLevel.ticketCategory(event, ticketCategory.getId())).getValueAsBooleanOrDefault());
 
@@ -175,7 +185,7 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testOverrideMechanism() {
+    void testOverrideMechanism() {
 
         Organization organization = organizationRepository.findByName("org").orElseThrow();
 
@@ -208,7 +218,7 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testBasicConfigurationNotNeeded() {
+    void testBasicConfigurationNotNeeded() {
 
         configurationRepository.deleteByKey(ConfigurationKeys.BASE_URL.getValue());
         configurationRepository.deleteByKey(ConfigurationKeys.SUPPORTED_LANGUAGES.getValue());
@@ -221,11 +231,11 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testSaveOnlyExistingConfiguration() {
+    void testSaveOnlyExistingConfiguration() {
         configurationRepository.insertOrganizationLevel(event.getOrganizationId(), ConfigurationKeys.BANK_ACCOUNT_NR.getValue(), "MY-ACCOUNT_NUMBER", "empty");
         Configuration existing = configurationRepository.findByKeyAtOrganizationLevel(event.getOrganizationId(), ConfigurationKeys.BANK_ACCOUNT_NR.getValue()).orElseThrow(IllegalStateException::new);
         Map<ConfigurationKeys.SettingCategory, List<Configuration>> all = configurationManager.loadOrganizationConfig(event.getOrganizationId(), USERNAME);
-        List<Configuration> flatten = all.entrySet().stream().flatMap(e -> e.getValue().stream()).collect(Collectors.toList());
+        List<Configuration> flatten = all.entrySet().stream().flatMap(e -> e.getValue().stream()).toList();
         List<ConfigurationModification> modified = flatten.stream().filter(c -> !c.getKey().equals(ConfigurationKeys.BANK_ACCOUNT_NR.getValue())).map(ConfigurationModification::fromConfiguration).collect(Collectors.toList());
         modified.add(new ConfigurationModification(existing.getId(), existing.getKey(), "NEW-NUMBER"));
         configurationManager.saveAllOrganizationConfiguration(event.getOrganizationId(), modified, USERNAME);
@@ -239,11 +249,11 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testSaveOnlyValidConfiguration() {
+    void testSaveOnlyValidConfiguration() {
         configurationRepository.insertOrganizationLevel(event.getOrganizationId(), ConfigurationKeys.BANK_ACCOUNT_NR.getValue(), "MY-ACCOUNT_NUMBER", "empty");
         Configuration existing = configurationRepository.findByKeyAtOrganizationLevel(event.getOrganizationId(), ConfigurationKeys.BANK_ACCOUNT_NR.getValue()).orElseThrow(IllegalStateException::new);
         Map<ConfigurationKeys.SettingCategory, List<Configuration>> all = configurationManager.loadOrganizationConfig(event.getOrganizationId(), USERNAME);
-        List<Configuration> flatten = all.entrySet().stream().flatMap(e -> e.getValue().stream()).collect(Collectors.toList());
+        List<Configuration> flatten = all.entrySet().stream().flatMap(e -> e.getValue().stream()).toList();
         List<ConfigurationModification> modified = flatten.stream().filter(c -> !c.getKey().equals(ConfigurationKeys.BANK_ACCOUNT_NR.getValue()) && !c.getKey().equals(ConfigurationKeys.PARTIAL_RESERVATION_ID_LENGTH.getValue())).map(ConfigurationModification::fromConfiguration).collect(Collectors.toList());
         modified.add(new ConfigurationModification(existing.getId(), existing.getKey(), "NEW-NUMBER"));
         modified.add(new ConfigurationModification(-1, ConfigurationKeys.PARTIAL_RESERVATION_ID_LENGTH.getValue(), "9"));
@@ -263,7 +273,7 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testLoadOrganizationConfiguration() {
+    void testLoadOrganizationConfiguration() {
         Map<ConfigurationKeys.SettingCategory, List<Configuration>> orgConf = configurationManager.loadOrganizationConfig(event.getOrganizationId(), USERNAME);
         assertEquals(ConfigurationKeys.byPathLevel(ConfigurationPathLevel.ORGANIZATION).size(), orgConf.values().stream().mapToLong(Collection::size).sum());
         String value = "MY-ACCOUNT_NUMBER";
@@ -274,13 +284,13 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testBasicConfigurationNeeded() {
+    void testBasicConfigurationNeeded() {
         configurationRepository.deleteByKey(ConfigurationKeys.BASE_URL.getValue());
         assertTrue(configurationManager.isBasicConfigurationNeeded());
     }
 
     @Test
-    public void testSaveBooleanOptions() {
+    void testSaveBooleanOptions() {
         String ftcKey = ALLOW_FREE_TICKETS_CANCELLATION.getValue();
         configurationRepository.insert(ftcKey, "false", "this should be updated to true");
         ConfigurationModification ftc = new ConfigurationModification(configurationRepository.findByKey(ftcKey).getId(), ftcKey, "true");
@@ -317,7 +327,7 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     }
 
     @Test
-    public void testBulk() {
+    void testBulk() {
         Event event = eventManager.getSingleEvent("eventShortName", "test");
 
         var res = configurationManager.getFor(Set.of(MAX_AMOUNT_OF_TICKETS_BY_RESERVATION, ENABLE_WAITING_QUEUE, ENABLE_WAITING_QUEUE_NOTIFICATION), ConfigurationLevel.event(event));
@@ -364,5 +374,38 @@ public class ConfigurationManagerIntegrationTest extends BaseIntegrationTest {
     void testBaseUrl() {
         configurationRepository.insertEventLevel(event.getOrganizationId(), event.getId(), BASE_URL.getValue(), "https://test/", "");
         assertEquals("https://test", configurationManager.baseUrl(event));
+    }
+
+    @Test
+    void testSystemApiKeyGeneration() {
+        assertTrue(configurationRepository.findOptionalByKey(SYSTEM_API_KEY.name()).isEmpty());
+        // force generation
+        var apiKey = configurationManager.retrieveSystemApiKey(false);
+        assertNotNull(apiKey);
+        assertFalse(apiKey.isEmpty());
+        // retrieve again the same apiKey
+        var apiKey2 = configurationManager.retrieveSystemApiKey(false);
+        assertEquals(apiKey, apiKey2);
+        // force apiKey rotation
+        apiKey2 = configurationManager.retrieveSystemApiKey(true);
+        assertNotNull(apiKey2);
+        assertFalse(apiKey2.isEmpty());
+        assertNotEquals(apiKey, apiKey2);
+    }
+
+    @Test
+    void ensureNoErrorsWhenDeniedMethodsOptionIsEmpty() {
+        var categories = ticketCategoryRepository.findAllTicketCategories(event.getId());
+        // insert empty value
+        configurationRepository.insertTicketCategoryLevel(event.getOrganizationId(), event.getId(), categories.get(0).getId(), PAYMENT_METHODS_BLACKLIST.name(), "", "");
+        // try with single category
+        var deniedMethods = configurationManager.getBlacklistedMethodsForReservation(event, List.of(categories.get(0).getId()));
+        assertNotNull(deniedMethods);
+        assertTrue(deniedMethods.isEmpty());
+
+        // try with multiple categories
+        deniedMethods = configurationManager.getBlacklistedMethodsForReservation(event, categories.stream().map(TicketCategory::getId).collect(Collectors.toList()));
+        assertNotNull(deniedMethods);
+        assertTrue(deniedMethods.isEmpty());
     }
 }

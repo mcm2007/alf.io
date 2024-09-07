@@ -4,7 +4,7 @@
     angular.module('adminApplication')
         .component('reservationCancel', {
             controller: ['AdminReservationService', 'ReservationCancelService', 'NotificationHandler', ReservationCancelCtrl],
-            templateUrl: '../resources/js/admin/feature/reservation-cancel/reservation-cancel.html',
+            templateUrl: window.ALFIO_CONTEXT_PATH + '/resources/js/admin/feature/reservation-cancel/reservation-cancel.html',
             bindings: {
                 purchaseContext: '<',
                 purchaseContextType: '<',
@@ -36,7 +36,7 @@
                             $scope.purchaseContext = purchaseContext;
                             $scope.purchaseContextType = purchaseContextType;
                             $scope.reservationId = reservation.id;
-                            $scope.invoiceRequested = reservation.customerData.invoiceRequested;
+                            $scope.invoiceRequested = reservation.customerData.invoiceRequested && reservation.status !== 'OFFLINE_PAYMENT';
                             $scope.credit = credit;
                             $scope.close = function() {
                                 $scope.$dismiss(false);

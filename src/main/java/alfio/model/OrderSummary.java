@@ -19,8 +19,11 @@ package alfio.model;
 import alfio.util.MonetaryUtil;
 import lombok.Data;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.stream.Collectors;
+
+import static alfio.util.MonetaryUtil.*;
 
 @Data
 public class OrderSummary {
@@ -54,14 +57,16 @@ public class OrderSummary {
     }
 
     public int getTicketAmount() {
-        return summary.stream().filter(s-> SummaryRow.SummaryType.TICKET == s.getType()).mapToInt(SummaryRow::getAmount).sum();
+        return summary.stream().filter(s-> SummaryRow.SummaryType.TICKET == s.type())
+            .mapToInt(SummaryRow::amount)
+            .sum();
     }
 
     public List<SummaryRow> getSummary() {
 
         //filter out the promotions code that have been inserted in the order but not used
         return summary.stream()
-            .filter(s-> !(s.isDiscount() && s.getAmount() == 0))
+            .filter(s-> !(s.isDiscount() && s.amount() == 0))
             .collect(Collectors.toList());
     }
 
@@ -85,18 +90,29 @@ public class OrderSummary {
         if(free) {
             return null;
         }
-        return MonetaryUtil.formatCents(originalTotalPrice.getPriceWithVAT() - originalTotalPrice.getVAT(), originalTotalPrice.getCurrencyCode());// FIXME can be null
+        return MonetaryUtil.formatCents(originalTotalPrice.priceWithVAT() - originalTotalPrice.VAT(), originalTotalPrice.currencyCode());// FIXME can be null
     }
 
     public int getPriceInCents() {
-        return originalTotalPrice.getPriceWithVAT();
+        return originalTotalPrice.priceWithVAT();
     }
 
     public String getDescriptionForPayment() {
-        return summary.stream().filter(r -> !r.isDiscount()).map(SummaryRow::getDescriptionForPayment).collect(Collectors.joining(", "));
+        return summary.stream().filter(r -> !r.isDiscount() && !r.getTaxDetail())
+            .map(SummaryRow::getDescriptionForPayment).collect(Collectors.joining(", "));
     }
 
     public boolean getDisplaySplitPaymentNote() {
         return !free && (vatStatus == PriceContainer.VatStatus.INCLUDED_NOT_CHARGED || vatStatus == PriceContainer.VatStatus.NOT_INCLUDED_NOT_CHARGED);
+    }
+
+    public String getPriceBeforeTaxes() {
+        String currencyCode = originalTotalPrice.currencyCode();
+        if(PriceContainer.VatStatus.isVatIncluded(vatStatus)) {
+            var vat = vatStatus.extractVat(centsToUnit(originalTotalPrice.priceWithVAT(), currencyCode), new BigDecimal(vatPercentage));
+            return formatUnit(new BigDecimal(getTotalPrice()).subtract(vat), currencyCode);
+        } else {
+            return formatCents(originalTotalPrice.priceWithVAT() - originalTotalPrice.VAT(), currencyCode);
+        }
     }
 }

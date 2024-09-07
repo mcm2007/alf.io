@@ -16,13 +16,16 @@
  */
 package alfio.extension;
 
-import lombok.extern.log4j.Log4j2;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.stream.Stream;
 
-@Log4j2
 public class ConsoleLogger {
+
+    private static final Logger log = LoggerFactory.getLogger(ConsoleLogger.class);
+
     private final ExtensionLogger extensionLogger;
 
     public ConsoleLogger(ExtensionLogger extensionLogger) {
@@ -30,6 +33,24 @@ public class ConsoleLogger {
     }
 
     public void log(Object first, Object... others) {
+        var message = composeMessage(first, others);
+        log.info(message);
+        extensionLogger.logInfo(message);
+    }
+
+    public void warn(Object first, Object... others) {
+        var message = composeMessage(first, others);
+        log.warn(message);
+        extensionLogger.logWarning(message);
+    }
+
+    public void error(Object first, Object... others) {
+        var message = composeMessage(first, others);
+        log.error(message);
+        extensionLogger.logError(message);
+    }
+
+    private static String composeMessage(Object first, Object... others) {
         String messageTemplate = "%s";
         var parameterPlaceholders = "";
         Object[] paramObjects;
@@ -41,8 +62,6 @@ public class ConsoleLogger {
         } else {
             paramObjects = new Object[] {first};
         }
-        var message = String.format(messageTemplate + parameterPlaceholders, paramObjects);
-        log.info(message);
-        extensionLogger.logInfo(message);
+        return String.format(messageTemplate + parameterPlaceholders, paramObjects);
     }
 }

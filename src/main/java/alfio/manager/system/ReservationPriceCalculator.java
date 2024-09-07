@@ -22,7 +22,6 @@ import alfio.model.decorator.SubscriptionPriceContainer;
 import alfio.model.decorator.TicketPriceContainer;
 import alfio.model.subscription.Subscription;
 import alfio.util.MonetaryUtil;
-import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.math.BigDecimal;
@@ -33,7 +32,7 @@ import java.util.stream.Collectors;
 
 import static org.apache.commons.lang3.ObjectUtils.firstNonNull;
 
-@RequiredArgsConstructor
+
 public class ReservationPriceCalculator implements PriceContainer {
     final TicketReservation reservation;
     final PromoCodeDiscount discount;
@@ -44,9 +43,27 @@ public class ReservationPriceCalculator implements PriceContainer {
     private final List<Subscription> subscriptions;
     private final Optional<Subscription> appliedSubscription;
 
+    public ReservationPriceCalculator(TicketReservation reservation,
+                                      PromoCodeDiscount discount,
+                                      List<Ticket> tickets,
+                                      List<AdditionalServiceItem> additionalServiceItems,
+                                      List<AdditionalService> additionalServices,
+                                      PurchaseContext purchaseContext,
+                                      List<Subscription> subscriptions,
+                                      Optional<Subscription> appliedSubscription) {
+        this.reservation = reservation;
+        this.discount = discount;
+        this.tickets = tickets;
+        this.additionalServiceItems = additionalServiceItems;
+        this.additionalServices = additionalServices;
+        this.purchaseContext = purchaseContext;
+        this.subscriptions = subscriptions;
+        this.appliedSubscription = appliedSubscription;
+    }
+
     @Override
     public int getSrcPriceCts() {
-        return tickets.stream().mapToInt(Ticket::getSrcPriceCts).sum() +
+        return tickets.stream().mapToInt(this::getTicketSrcPriceCts).sum() +
             additionalServiceItems.stream().mapToInt(AdditionalServiceItem::getSrcPriceCts).sum() +
             subscriptions.stream().mapToInt(Subscription::getSrcPriceCts).sum();
     }
@@ -62,7 +79,10 @@ public class ReservationPriceCalculator implements PriceContainer {
             if (discount.getDiscountType() == PromoCodeDiscount.DiscountType.FIXED_AMOUNT_RESERVATION) {
                 return MonetaryUtil.centsToUnit(discount.getDiscountAmount() + subscriptionDiscount, reservation.getCurrencyCode());
             }
-            return MonetaryUtil.centsToUnit(tickets.stream().mapToInt(Ticket::getDiscountCts).sum() +
+            int ticketDiscount = tickets.stream()
+                .mapToInt(t -> MonetaryUtil.unitToCents(TicketPriceContainer.from(t, reservation.getVatStatus(), reservation.getVatPercentageOrZero(), purchaseContext.getVatStatus(), discount).getAppliedDiscount(), reservation.getCurrencyCode()))
+                .sum();
+            return MonetaryUtil.centsToUnit(ticketDiscount +
                     additionalServiceItems.stream().mapToInt(AdditionalServiceItem::getDiscountCts).sum() +
                     subscriptions.stream().mapToInt(Subscription::getDiscountCts).sum() + subscriptionDiscount, reservation.getCurrencyCode());
         }
@@ -112,6 +132,13 @@ public class ReservationPriceCalculator implements PriceContainer {
         var additionalServiceItems = additionalServiceItemsByAdditionalService.stream().flatMap(p -> p.getRight().stream()).collect(Collectors.toList());
         var additionalServices = additionalServiceItemsByAdditionalService.stream().map(Pair::getKey).collect(Collectors.toList());
         return new ReservationPriceCalculator(reservation, discount, tickets, additionalServiceItems, additionalServices, purchaseContext, subscriptions, appliedSubscription);
+    }
+
+    private int getTicketSrcPriceCts(Ticket t) {
+        if(VatStatus.isVatExempt(t.getVatStatus())) {
+            return t.getSrcPriceCts() - Math.abs(t.getVatCts()); // VAT can be negative in some cases
+        }
+        return t.getSrcPriceCts();
     }
 
 }

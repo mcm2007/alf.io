@@ -17,6 +17,7 @@
 package alfio.repository;
 
 import alfio.model.PromoCodeDiscount;
+import alfio.model.PromoCodeUsageResult;
 import ch.digitalfondue.npjt.Bind;
 import ch.digitalfondue.npjt.Query;
 import ch.digitalfondue.npjt.QueryRepository;
@@ -44,8 +45,8 @@ public interface PromoCodeDiscountRepository {
     @Query("select * from promo_code where id = :id")
     Optional<PromoCodeDiscount> findOptionalById(@Bind("id") int id);
 
-    @Query("insert into promo_code(promo_code, event_id_fk, organization_id_fk, valid_from, valid_to, discount_amount, discount_type, categories, max_usage, description, email_reference, code_type, hidden_category_id) "
-        + " values (:promoCode, :eventId, :organizationId, :start, :end, :discountAmount, :discountType, :categories, :maxUsage, :description, :emailReference, :codeType, :hiddenCategoryId)")
+    @Query("insert into promo_code(promo_code, event_id_fk, organization_id_fk, valid_from, valid_to, discount_amount, discount_type, categories, max_usage, description, email_reference, code_type, hidden_category_id, currency_code) "
+        + " values (:promoCode, :eventId, :organizationId, :start, :end, :discountAmount, :discountType, :categories, :maxUsage, :description, :emailReference, :codeType, :hiddenCategoryId, :currencyCode)")
     int addPromoCode(@Bind("promoCode") String promoCode,
                      @Bind("eventId") Integer eventId,
                      @Bind("organizationId") int organizationId,
@@ -58,7 +59,8 @@ public interface PromoCodeDiscountRepository {
                      @Bind("description") String description,
                      @Bind("emailReference") String emailReference,
                      @Bind("codeType") PromoCodeDiscount.CodeType codeType,
-                     @Bind("hiddenCategoryId") Integer hiddenCategoryId);
+                     @Bind("hiddenCategoryId") Integer hiddenCategoryId,
+                     @Bind("currencyCode") String currencyCode);
 
     @Query("insert into promo_code(promo_code, event_id_fk, organization_id_fk, valid_from, valid_to, discount_amount, discount_type, categories, max_usage, description, email_reference, code_type, hidden_category_id) "
         + " values (:promoCode, :eventId, :organizationId, :start, :end, :discountAmount, :discountType, :categories, :maxUsage, :description, :emailReference, :codeType, :hiddenCategoryId) "
@@ -113,4 +115,9 @@ public interface PromoCodeDiscountRepository {
 
     @Query("select id from promo_code where code_type = 'ACCESS' and id = :id for update")
     Integer lockAccessCodeForUpdate(@Bind("id") int id);
+
+    @Query("select * from promocode_usage_details where promo_code = :promoCode" +
+        " and (:eventId is null or :eventId = event_id)")
+    List<PromoCodeUsageResult> findDetailedUsage(@Bind("promoCode") String promoCode,
+                                                 @Bind("eventId") Integer eventId);
 }

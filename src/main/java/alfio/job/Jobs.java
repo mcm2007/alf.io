@@ -20,10 +20,10 @@ import alfio.config.Initializer;
 import alfio.manager.*;
 import alfio.manager.system.AdminJobExecutor;
 import alfio.manager.system.AdminJobManager;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.time.DateUtils;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -41,15 +41,16 @@ import java.util.Map;
 @Component
 @DependsOn("migrator")
 @Profile("!" + Initializer.PROFILE_DISABLE_JOBS)
-@AllArgsConstructor
-@Log4j2
 public class Jobs {
+
+    private static final Logger log = LoggerFactory.getLogger(Jobs.class);
 
 
     private static final int ONE_MINUTE = 1000 * 60;
     private static final int THIRTY_SECONDS = 1000 * 30;
     private static final int FIVE_SECONDS = 1000 * 5;
     private static final int THIRTY_MINUTES = 30 * ONE_MINUTE;
+    private static final String EVERY_HOUR = "0 0 0/1 * * ?";
 
     private final AdminReservationRequestManager adminReservationRequestManager;
     private final FileUploadManager fileUploadManager;
@@ -58,6 +59,22 @@ public class Jobs {
     private final TicketReservationManager ticketReservationManager;
     private final WaitingQueueSubscriptionProcessor waitingQueueSubscriptionProcessor;
     private final AdminJobManager adminJobManager;
+
+    public Jobs(AdminReservationRequestManager adminReservationRequestManager,
+                FileUploadManager fileUploadManager,
+                NotificationManager notificationManager,
+                SpecialPriceTokenGenerator specialPriceTokenGenerator,
+                TicketReservationManager ticketReservationManager,
+                WaitingQueueSubscriptionProcessor waitingQueueSubscriptionProcessor,
+                AdminJobManager adminJobManager) {
+        this.adminReservationRequestManager = adminReservationRequestManager;
+        this.fileUploadManager = fileUploadManager;
+        this.notificationManager = notificationManager;
+        this.specialPriceTokenGenerator = specialPriceTokenGenerator;
+        this.ticketReservationManager = ticketReservationManager;
+        this.waitingQueueSubscriptionProcessor = waitingQueueSubscriptionProcessor;
+        this.adminJobManager = adminJobManager;
+    }
 
 
     //cron each minute: "0 0/1 * * * ?"
@@ -85,11 +102,21 @@ public class Jobs {
 
 
     //run each hour
-    @Scheduled(cron = "0 0 0/1 * * ?")
+    @Scheduled(cron = EVERY_HOUR)
     public void sendOfflinePaymentReminderToEventOrganizers() {
         log.trace("running job sendOfflinePaymentReminderToEventOrganizers");
         try {
             adminJobManager.scheduleExecution(AdminJobExecutor.JobName.SEND_OFFLINE_PAYMENT_TO_ORGANIZER, Map.of());
+        } finally {
+            log.trace("end job sendOfflinePaymentReminderToEventOrganizers");
+        }
+    }
+
+    @Scheduled(cron = EVERY_HOUR)
+    public void assignTicketsToSubscribers() {
+        log.trace("running job assignTicketsToSubscribers");
+        try {
+            adminJobManager.scheduleExecution(AdminJobExecutor.JobName.ASSIGN_TICKETS_TO_SUBSCRIBERS, Map.of());
         } finally {
             log.trace("end job sendOfflinePaymentReminderToEventOrganizers");
         }

@@ -44,6 +44,8 @@ import alfio.repository.audit.ScanAuditRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
 import alfio.repository.user.UserRepository;
+import alfio.test.util.AlfioIntegrationTest;
+import alfio.util.BaseIntegrationTest;
 import alfio.util.ClockProvider;
 import org.apache.commons.lang3.tuple.Pair;
 import org.junit.jupiter.api.Test;
@@ -62,11 +64,10 @@ import java.util.List;
 
 import static alfio.test.util.IntegrationTestUtil.*;
 
-@SpringBootTest
+@AlfioIntegrationTest
 @ContextConfiguration(classes = {DataSourceConfiguration.class, TestConfiguration.class, ControllerConfiguration.class})
 @ActiveProfiles({Initializer.PROFILE_DEV, Initializer.PROFILE_DISABLE_JOBS, Initializer.PROFILE_INTEGRATION_TEST})
-@Transactional
-public class HybridEventReservationFlowIntegrationTest extends BaseReservationFlowTest {
+class HybridEventReservationFlowIntegrationTest extends BaseReservationFlowTest {
 
     private final OrganizationRepository organizationRepository;
     private final UserManager userManager;
@@ -105,7 +106,11 @@ public class HybridEventReservationFlowIntegrationTest extends BaseReservationFl
                                                      ExtensionService extensionService,
                                                      PollRepository pollRepository,
                                                      NotificationManager notificationManager,
-                                                     UserRepository userRepository) {
+                                                     UserRepository userRepository,
+                                                     OrganizationDeleter organizationDeleter,
+                                                     PromoCodeDiscountRepository promoCodeDiscountRepository,
+                                                     PromoCodeRequestManager promoCodeRequestManager,
+                                                     ExportManager exportManager) {
         super(configurationRepository,
             eventManager,
             eventRepository,
@@ -137,7 +142,11 @@ public class HybridEventReservationFlowIntegrationTest extends BaseReservationFl
             pollRepository,
             clockProvider,
             notificationManager,
-            userRepository);
+            userRepository,
+            organizationDeleter,
+            promoCodeDiscountRepository,
+            promoCodeRequestManager,
+            exportManager);
         this.organizationRepository = organizationRepository;
         this.userManager = userManager;
     }
@@ -158,7 +167,13 @@ public class HybridEventReservationFlowIntegrationTest extends BaseReservationFl
     }
 
     @Test
-    public void hybridEvent() throws Exception {
+    void hybridEvent() throws Exception {
         super.testBasicFlow(this::createContext);
+    }
+
+    @Override
+    protected void performAdditionalTests(ReservationFlowContext context) {
+        var event = context.event;
+        BaseIntegrationTest.testTransferEventToAnotherOrg(event.getId(), event.getOrganizationId(), context.userId, jdbcTemplate);
     }
 }

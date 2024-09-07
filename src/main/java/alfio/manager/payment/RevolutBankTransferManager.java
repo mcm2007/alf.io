@@ -34,9 +34,9 @@ import alfio.util.MonetaryUtil;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
@@ -51,7 +51,6 @@ import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 import static alfio.model.system.ConfigurationKeys.*;
 import static alfio.util.EventUtil.JSON_DATETIME_FORMATTER;
@@ -59,10 +58,11 @@ import static alfio.util.EventUtil.JSON_DATETIME_FORMATTER;
 @Component
 @Order(1)
 @Transactional
-@Log4j2
-@AllArgsConstructor
 public class RevolutBankTransferManager implements PaymentProvider, OfflineProcessor, PaymentInfo {
 
+    private static final Logger log = LoggerFactory.getLogger(RevolutBankTransferManager.class);
+
+    private static final String GENERIC_ERROR = "error";
     private final BankTransferManager bankTransferManager;
     private final ConfigurationManager configurationManager;
     private final TransactionRepository transactionRepository;
@@ -71,6 +71,18 @@ public class RevolutBankTransferManager implements PaymentProvider, OfflineProce
     private static final Cache<String, List<String>> accountsCache = Caffeine.newBuilder()
         .expireAfterWrite(Duration.ofHours(1))
         .build();
+
+    public RevolutBankTransferManager(BankTransferManager bankTransferManager,
+                                      ConfigurationManager configurationManager,
+                                      TransactionRepository transactionRepository,
+                                      HttpClient client,
+                                      ClockProvider clockProvider) {
+        this.bankTransferManager = bankTransferManager;
+        this.configurationManager = configurationManager;
+        this.transactionRepository = transactionRepository;
+        this.client = client;
+        this.clockProvider = clockProvider;
+    }
 
     @Override
     public Set<PaymentMethod> getSupportedPaymentMethods(PaymentContext paymentContext, TransactionRequest transactionRequest) {
@@ -132,8 +144,7 @@ public class RevolutBankTransferManager implements PaymentProvider, OfflineProce
         List<Pair<TicketReservationWithTransaction, RevolutTransactionDescriptor>> matched = pendingReservations.stream()
             .map(reservation -> Pair.of(reservation, transactions.stream().filter(transactionMatches(reservation, context)).findFirst()))
             .filter(pair -> pair.getRight().isPresent())
-            .map(pair -> Pair.of(pair.getLeft(), pair.getRight().orElseThrow()))
-            .collect(Collectors.toList());
+            .map(pair -> Pair.of(pair.getLeft(), pair.getRight().orElseThrow())).toList();
 
         return Result.success(matched.stream().map(pair -> {
                 var reservationId = pair.getLeft().getTicketReservation().getId();
@@ -156,7 +167,7 @@ public class RevolutBankTransferManager implements PaymentProvider, OfflineProce
                 return reservationId;
             })
             .filter(Objects::nonNull)
-            .collect(Collectors.toList()));
+            .toList());
     }
 
     private Predicate<RevolutTransactionDescriptor> transactionMatches(TicketReservationWithTransaction reservationWithTransaction, PaymentContext context) {
@@ -193,12 +204,16 @@ public class RevolutBankTransferManager implements PaymentProvider, OfflineProce
                 return Result.success(
                     result.stream()
                         .filter(t -> "completed".equals(t.getState()) && t.getLegs().size() == 1 && accounts.contains(t.getLegs().get(0).getAccountId()))
-                        .collect(Collectors.toList()));
+                        .toList());
             }
             return Result.error(ErrorCode.custom("no data received", "No data received from Revolut. Status code is "+response.statusCode()));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Request interrupted while calling Revolut API", e);
+            return Result.error(ErrorCode.custom(GENERIC_ERROR, "Cannot call Revolut API"));
         } catch (Exception e) {
             log.warn("cannot call Revolut APIs", e);
-            return Result.error(ErrorCode.custom("error", "Cannot call Revolut API"));
+            return Result.error(ErrorCode.custom(GENERIC_ERROR, "Cannot call Revolut API"));
         }
     }
 
@@ -207,7 +222,7 @@ public class RevolutBankTransferManager implements PaymentProvider, OfflineProce
         try {
             return Result.success(accountsCache.get(key, k -> loadAccountsFromAPI(revolutKey, baseUrl)));
         } catch (Exception e) {
-            return Result.error(ErrorCode.custom("error", e.getMessage()));
+            return Result.error(ErrorCode.custom(GENERIC_ERROR, e.getMessage()));
         }
     }
 
@@ -218,11 +233,18 @@ public class RevolutBankTransferManager implements PaymentProvider, OfflineProce
             .build();
         try {
             var response = client.send(request, HttpResponse.BodyHandlers.ofString());
-            if(response.statusCode() == HttpStatus.OK.value()) {
-                List<Map<String, ?>> result = Json.fromJson(response.body(), new TypeReference<>() {});
-                return result.stream().filter(m -> "active".equals(m.get("state"))).map(m -> (String) m.get("id")).collect(Collectors.toList());
+            if (response.statusCode() == HttpStatus.OK.value()) {
+                List<Map<String, ?>> result = Json.fromJson(response.body(), new TypeReference<>() {
+                });
+                return result.stream().filter(m -> "active".equals(m.get("state"))).map(m -> (String) m.get("id")).toList();
             }
             throw new IllegalStateException("cannot retrieve accounts");
+        } catch (IllegalStateException ex) {
+            throw ex;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Request interrupted while retrieving accounts", e);
+            throw new IllegalStateException(e);
         } catch (Exception e) {
             log.warn("got error while retrieving accounts", e);
             throw new IllegalStateException(e);

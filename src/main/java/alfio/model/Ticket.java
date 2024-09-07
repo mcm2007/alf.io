@@ -18,6 +18,7 @@ package alfio.model;
 
 import alfio.model.support.Array;
 import alfio.util.MonetaryUtil;
+import alfio.util.checkin.NameNormalizer;
 import ch.digitalfondue.npjt.ConstructorAnnotationRowMapper.Column;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
@@ -60,6 +61,7 @@ public class Ticket implements TicketInfoContainer {
 
     private final List<String> tags;
     private final UUID subscriptionId;
+    private final PriceContainer.VatStatus vatStatus;
 
     public Ticket(@JsonProperty("id") @Column("id") int id,
                   @JsonProperty("uuid") @Column("uuid") String uuid,
@@ -81,7 +83,8 @@ public class Ticket implements TicketInfoContainer {
                   @JsonProperty("extReference") @Column("ext_reference") String extReference,
                   @JsonProperty("currencyCode") @Column("currency_code") String currencyCode,
                   @JsonProperty("tags") @Column("tags") @Array List<String> tags,
-                  @JsonProperty("subscriptionId") @Column("subscription_id_fk") UUID subscriptionId) {
+                  @JsonProperty("subscriptionId") @Column("subscription_id_fk") UUID subscriptionId,
+                  @JsonProperty("vatStatus") @Column("vat_status") PriceContainer.VatStatus vatStatus) {
         this.id = id;
         this.uuid = uuid;
         this.creation = creation;
@@ -104,6 +107,7 @@ public class Ticket implements TicketInfoContainer {
         this.currencyCode = currencyCode;
         this.tags = tags;
         this.subscriptionId = subscriptionId;
+        this.vatStatus = vatStatus;
     }
     
     @Override
@@ -123,12 +127,12 @@ public class Ticket implements TicketInfoContainer {
      * @param eventKey
      * @return
      */
-    public String ticketCode(String eventKey) {
-        return uuid + '/' + hmacTicketInfo(eventKey);
+    public String ticketCode(String eventKey, boolean caseInsensitive) {
+        return uuid + '/' + hmacTicketInfo(eventKey, caseInsensitive);
     }
 
-    public String hmacTicketInfo(String eventKey) {
-        return hmacSHA256Base64(eventKey, StringUtils.join(new String[]{ticketsReservationId , uuid, getFullName(), email}, '/'));
+    public String hmacTicketInfo(String eventKey, boolean caseInsensitive) {
+        return generateHmacTicketInfo(eventKey, caseInsensitive, getFullName(), email, ticketsReservationId, uuid);
     }
 
     public boolean hasBeenSold() {
@@ -138,6 +142,16 @@ public class Ticket implements TicketInfoContainer {
     @Override
     public boolean isCheckedIn() {
         return status == TicketStatus.CHECKED_IN;
+    }
+
+    static String generateHmacTicketInfo(String eventKey, boolean caseInsensitive, String fullName, String email, String ticketsReservationId, String uuid) {
+        var attendeeName = fullName;
+        var attendeeEmail = email;
+        if (caseInsensitive) {
+            attendeeName = NameNormalizer.normalize(attendeeName);
+            attendeeEmail = email.toLowerCase(Locale.ROOT);
+        }
+        return hmacSHA256Base64(eventKey, StringUtils.join(new String[]{ticketsReservationId , uuid, attendeeName, attendeeEmail}, '/'));
     }
 
     public static String hmacSHA256Base64(String key, String code) {
@@ -154,5 +168,32 @@ public class Ticket implements TicketInfoContainer {
 
     public String getFormattedNetPrice() {
         return MonetaryUtil.formatCents(finalPriceCts - vatCts, currencyCode);
+    }
+
+    public Ticket withVatStatus(PriceContainer.VatStatus newVatStatus) {
+        return new Ticket(
+            id,
+            uuid,
+            creation,
+            categoryId,
+            status.name(),
+            eventId,
+            ticketsReservationId,
+            fullName,
+            firstName,
+            lastName,
+            email,
+            lockedAssignment,
+            userLanguage,
+            srcPriceCts,
+            finalPriceCts,
+            vatCts,
+            discountCts,
+            extReference,
+            currencyCode,
+            tags,
+            subscriptionId,
+            newVatStatus
+        );
     }
 }

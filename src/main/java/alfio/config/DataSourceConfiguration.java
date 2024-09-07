@@ -17,17 +17,17 @@
 package alfio.config;
 
 import alfio.config.support.ArrayColumnMapper;
+import alfio.config.support.EnumTypeColumnMapper;
 import alfio.config.support.JSONColumnMapper;
 import alfio.config.support.PlatformProvider;
+import alfio.extension.ExtensionService;
 import alfio.job.Jobs;
-import alfio.job.executor.BillingDocumentJobExecutor;
-import alfio.job.executor.ReservationJobExecutor;
+import alfio.job.executor.*;
 import alfio.manager.*;
 import alfio.manager.i18n.MessageSourceManager;
 import alfio.manager.system.AdminJobManager;
 import alfio.manager.system.ConfigurationManager;
-import alfio.repository.EventDeleterRepository;
-import alfio.repository.EventRepository;
+import alfio.repository.*;
 import alfio.repository.system.AdminJobQueueRepository;
 import alfio.repository.system.ConfigurationRepository;
 import alfio.repository.user.OrganizationRepository;
@@ -41,9 +41,11 @@ import ch.digitalfondue.npjt.EnableNpjt;
 import ch.digitalfondue.npjt.mapper.ColumnMapperFactory;
 import ch.digitalfondue.npjt.mapper.ParameterConverter;
 import com.zaxxer.hikari.HikariDataSource;
-import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.concurrent.BasicThreadFactory;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.*;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -77,9 +79,10 @@ import java.util.function.Supplier;
 @EnableScheduling
 @EnableAsync
 @ComponentScan(basePackages = {"alfio.manager", "alfio.extension"})
-@Log4j2
 @EnableNpjt(basePackages = "alfio.repository")
 public class DataSourceConfiguration {
+
+    private static final Logger log = LoggerFactory.getLogger(DataSourceConfiguration.class);
 
     private static final Set<PlatformProvider> PLATFORM_PROVIDERS = EnumSet.complementOf(EnumSet.of(PlatformProvider.DEFAULT));
 
@@ -112,7 +115,7 @@ public class DataSourceConfiguration {
             // check
             boolean isSuperAdmin = Boolean.TRUE.equals(new NamedParameterJdbcTemplate(dataSource)
                 .queryForObject("select usesuper from pg_user where usename = CURRENT_USER",
-                    new EmptySqlParameterSource(),
+                    EmptySqlParameterSource.INSTANCE,
                     Boolean.class));
 
             if (isSuperAdmin) {
@@ -148,12 +151,12 @@ public class DataSourceConfiguration {
 
     @Bean
     public List<ColumnMapperFactory> getAdditionalColumnMappers() {
-        return Arrays.asList(new JSONColumnMapper.Factory(), new ArrayColumnMapper.Factory());
+        return Arrays.asList(new JSONColumnMapper.Factory(), new ArrayColumnMapper.Factory(), new EnumTypeColumnMapper.Factory());
     }
 
     @Bean
     public List<ParameterConverter> getAdditionalParameterConverters() {
-        return Arrays.asList(new JSONColumnMapper.Converter(), new ArrayColumnMapper.Converter());
+        return Arrays.asList(new JSONColumnMapper.Converter(), new ArrayColumnMapper.Converter(), new EnumTypeColumnMapper.Converter());
     }
 
     @Bean
@@ -212,7 +215,9 @@ public class DataSourceConfiguration {
     public HttpClient getHttpClient() {
         return HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
-            .executor(Executors.newCachedThreadPool())
+            .executor(Executors.newCachedThreadPool(new BasicThreadFactory.Builder()
+                .namingPattern("httpClient-thread-%d")
+                .build()))
             .build();
     }
 
@@ -244,9 +249,12 @@ public class DataSourceConfiguration {
                                     PlatformTransactionManager transactionManager,
                                     ClockProvider clockProvider,
                                     ReservationJobExecutor reservationJobExecutor,
-                                    BillingDocumentJobExecutor billingDocumentJobExecutor) {
+                                    BillingDocumentJobExecutor billingDocumentJobExecutor,
+                                    AssignTicketToSubscriberJobExecutor assignTicketToSubscriberJobExecutor,
+                                    RetryFailedExtensionJobExecutor retryFailedExtensionJobExecutor,
+                                    RetryFailedReservationConfirmationExecutor retryFailedReservationConfirmationExecutor) {
         return new AdminJobManager(
-            List.of(reservationJobExecutor, billingDocumentJobExecutor),
+            List.of(reservationJobExecutor, billingDocumentJobExecutor, assignTicketToSubscriberJobExecutor, retryFailedExtensionJobExecutor, retryFailedReservationConfirmationExecutor),
             adminJobQueueRepository,
             transactionManager,
             clockProvider);
@@ -267,15 +275,40 @@ public class DataSourceConfiguration {
     }
 
     @Bean
+    AssignTicketToSubscriberJobExecutor assignTicketToSubscriberJobExecutor(AdminReservationRequestManager requestManager,
+                                                                            ConfigurationManager configurationManager,
+                                                                            SubscriptionRepository subscriptionRepository,
+                                                                            EventRepository eventRepository,
+                                                                            ClockProvider clockProvider,
+                                                                            TicketCategoryRepository ticketCategoryRepository) {
+        return new AssignTicketToSubscriberJobExecutor(requestManager,
+            configurationManager,
+            subscriptionRepository,
+            eventRepository,
+            clockProvider,
+            ticketCategoryRepository);
+    }
+
+    @Bean
+    RetryFailedExtensionJobExecutor retryFailedExtensionJobExecutor(ExtensionService extensionService) {
+        return new RetryFailedExtensionJobExecutor(extensionService);
+    }
+
+    @Bean
+    RetryFailedReservationConfirmationExecutor retryFailedReservationConfirmationExecutor(ReservationFinalizer reservationFinalizer, Json json) {
+        return new RetryFailedReservationConfirmationExecutor(reservationFinalizer, json);
+    }
+
+    @Bean
     @Profile(Initializer.PROFILE_DEMO)
     DemoModeDataManager demoModeDataManager(UserRepository userRepository,
                                             UserOrganizationRepository userOrganizationRepository,
-                                            OrganizationRepository organizationRepository,
                                             EventDeleterRepository eventDeleterRepository,
                                             EventRepository eventRepository,
-                                            ConfigurationManager configurationManager) {
-        return new DemoModeDataManager(userRepository, userOrganizationRepository, organizationRepository,
-            eventDeleterRepository, eventRepository, configurationManager);
+                                            ConfigurationManager configurationManager,
+                                            OrganizationDeleterRepository organizationDeleterRepository) {
+        return new DemoModeDataManager(userRepository, userOrganizationRepository,
+            eventDeleterRepository, eventRepository, configurationManager, organizationDeleterRepository);
     }
 
     /**

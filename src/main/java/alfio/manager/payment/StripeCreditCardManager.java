@@ -34,8 +34,9 @@ import alfio.util.ClockProvider;
 import com.stripe.exception.StripeException;
 import com.stripe.model.BalanceTransaction;
 import com.stripe.model.Charge;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.tuple.Pair;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
@@ -47,12 +48,13 @@ import static alfio.manager.payment.BaseStripeManager.STRIPE_MANAGER_TYPE_KEY;
 import static alfio.model.system.ConfigurationKeys.*;
 
 @Component
-@Log4j2
 public class StripeCreditCardManager implements PaymentProvider, ClientServerTokenRequest, RefundRequest, PaymentInfo {
+
+    private static final Logger log = LoggerFactory.getLogger(StripeCreditCardManager.class);
 
     public static final String STRIPE_UNEXPECTED = "error.STEP2_STRIPE_unexpected";
     private static final String STRIPE_MANAGER = StripeCreditCardManager.class.getName();
-    public static final EnumSet<ConfigurationKeys> OPTIONS_TO_LOAD = EnumSet.of(STRIPE_ENABLE_SCA, STRIPE_SECRET_KEY, STRIPE_PUBLIC_KEY);
+    protected static final EnumSet<ConfigurationKeys> OPTIONS_TO_LOAD = EnumSet.of(STRIPE_ENABLE_SCA, STRIPE_SECRET_KEY, STRIPE_PUBLIC_KEY);
 
     private final TransactionRepository transactionRepository;
     private final BaseStripeManager baseStripeManager;
@@ -151,7 +153,7 @@ public class StripeCreditCardManager implements PaymentProvider, ClientServerTok
             return optionalCharge.map(charge -> {
                 log.info("transaction {} paid: {}", spec.getReservationId(), charge.getPaid());
                 Pair<Long, Long> fees = Optional.ofNullable(charge.getBalanceTransactionObject()).map( bt -> {
-                    List<BalanceTransaction.Fee> feeDetails = bt.getFeeDetails();
+                    List<BalanceTransaction.FeeDetail> feeDetails = bt.getFeeDetails();
                     return Pair.of(Optional.ofNullable( BaseStripeManager.getFeeAmount(feeDetails, "application_fee")).map(Long::parseLong).orElse(0L),
                         Optional.ofNullable( BaseStripeManager.getFeeAmount(feeDetails, "stripe_fee")).map(Long::parseLong).orElse(0L));
                 }).orElse(null);
@@ -162,10 +164,9 @@ public class StripeCreditCardManager implements PaymentProvider, ClientServerTok
                     fees != null ? fees.getLeft() : 0L, fees != null ? fees.getRight() : 0L, Transaction.Status.COMPLETE, Map.of(STRIPE_MANAGER_TYPE_KEY, STRIPE_MANAGER));
                 return PaymentResult.successful(charge.getId());
             }).orElseGet(() -> PaymentResult.failed("error.STEP2_UNABLE_TO_TRANSITION"));
+        } catch (StripeException e) {
+            return PaymentResult.failed(baseStripeManager.handleException(e));
         } catch (Exception e) {
-            if(e instanceof StripeException) {
-                return PaymentResult.failed( baseStripeManager.handleException((StripeException)e));
-            }
             throw new IllegalStateException(e);
         }
     }

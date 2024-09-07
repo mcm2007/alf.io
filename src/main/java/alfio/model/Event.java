@@ -18,11 +18,11 @@ package alfio.model;
 
 import alfio.model.transaction.PaymentProxy;
 import alfio.util.ClockProvider;
+import alfio.util.EventUtil;
 import alfio.util.MonetaryUtil;
 import ch.digitalfondue.npjt.ConstructorAnnotationRowMapper.Column;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
-import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.flywaydb.core.api.MigrationVersion;
@@ -37,7 +37,6 @@ import java.util.stream.Collectors;
 import static java.time.temporal.ChronoField.OFFSET_SECONDS;
 
 @Getter
-@Log4j2
 public class Event extends EventAndOrganizationId implements EventHiddenFieldContainer, EventCheckInInfo, PurchaseContext {
 
     private static final String VERSION_FOR_FIRST_AND_LAST_NAME = "15.1.8.8";
@@ -252,6 +251,10 @@ public class Event extends EventAndOrganizationId implements EventHiddenFieldCon
 
     public boolean mustUseFirstAndLastName() {
         return mustUseFirstAndLastName(this);
+    }
+
+    public boolean supportsQRCodeCaseInsensitive() {
+        return EventUtil.supportsCaseInsensitiveQRCode(version);
     }
 
 

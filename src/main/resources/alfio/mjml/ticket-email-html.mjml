@@ -44,6 +44,9 @@
               tr .bottom-border {
                 border-bottom:2px solid #ecedee;
               }
+              img.wallet {
+                  padding-top: 20px;
+              }
         </mj-style>
 	  </mj-head>
 	<mj-body>
@@ -123,8 +126,23 @@
 				</mj-text>
 			</mj-column>
 		</mj-section>
-    
-	    <mj-section>
+
+        <mj-raw>{{#walletEnabled}}</mj-raw>
+        <mj-section background-color="#f8f8ff">
+            <mj-raw>{{#googleWalletEnabled}}</mj-raw>
+            <mj-column>
+                <mj-image width="199" css-class="wallet" rel="notrack" src="{{baseUrl}}/resources/images/email/enUS_add_to_google_wallet_add-wallet-badge.png" alt="Add to Google Wallet" align="center" href="{{baseUrl}}/api/wallet/event/{{event.shortName}}/v1/version/passes/{{ticket.uuid}}"></mj-image>
+            </mj-column>
+            <mj-raw>{{/googleWalletEnabled}}</mj-raw>
+            <mj-raw>{{#appleWalletEnabled}}</mj-raw>
+            <mj-column>
+                <mj-image width="193" css-class="wallet" rel="notrack" src="{{baseUrl}}/resources/images/email/add-to-apple-wallet-button.png" alt="Add to Apple Wallet" align="center" href="{{baseUrl}}/api/pass/event/{{event.shortName}}/v1/version/passes/{{ticket.uuid}}"></mj-image>
+            </mj-column>
+            <mj-raw>{{/appleWalletEnabled}}</mj-raw>
+        </mj-section>
+        <mj-raw>{{/walletEnabled}}</mj-raw>
+
+        <mj-section>
             <mj-column width="100%">
                 <mj-button align="center" background-color="#7C8B95" href="{{ticketUrl}}" rel="notrack"> {{#i18n}}email-ticket.view-modify{{/i18n}}</mj-button>
             </mj-column>
@@ -145,6 +163,21 @@
                 <mj-text align="center">{{#i18n}}alfio.credits{{/i18n}}</mj-text>
             </mj-column>
         </mj-section>
+
+        <mj-raw>{{#hasMailFooter}}</mj-raw>
+        <mj-section padding-bottom="0px" background-color="white">
+            <mj-column width="100%">
+                <mj-divider
+                    padding-top="20px" padding-bottom="0px" padding-left="0px"
+                    padding-right="0px" border-width="1px" border-color="#f4f4f4"></mj-divider>
+            </mj-column>
+            <mj-column width="100%">
+                <mj-text align="center" font-size="14px">
+                    <div style="white-space: pre;">{{mailFooter}}</div>
+                </mj-text>
+            </mj-column>
+        </mj-section>
+        <mj-raw>{{/hasMailFooter}}</mj-raw>
 
 	</mj-body>
 </mjml>

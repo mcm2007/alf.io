@@ -16,11 +16,11 @@
  */
 package alfio.manager;
 
+import alfio.manager.payment.PaymentSpecification;
 import alfio.manager.system.ConfigurationManager;
 import alfio.manager.system.Mailer;
 import alfio.model.*;
 import alfio.model.PurchaseContext.PurchaseContextType;
-import alfio.model.extension.CreditNoteGeneration;
 import alfio.model.system.ConfigurationKeys;
 import alfio.model.user.Organization;
 import alfio.repository.*;
@@ -30,9 +30,10 @@ import alfio.util.ClockProvider;
 import alfio.util.Json;
 import alfio.util.TemplateResource;
 import ch.digitalfondue.npjt.AffectedRowCountAndKey;
-import lombok.AllArgsConstructor;
-import lombok.extern.log4j.Log4j2;
+import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -40,20 +41,27 @@ import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.function.Supplier;
 
+import static alfio.model.Audit.EntityType.RESERVATION;
+import static alfio.model.Audit.EventType.EXTERNAL_CREDIT_NOTE_NUMBER;
+import static alfio.model.Audit.EventType.EXTERNAL_INVOICE_NUMBER;
 import static alfio.model.BillingDocument.Type.*;
 import static alfio.model.TicketReservation.TicketReservationStatus.CANCELLED;
 import static alfio.model.TicketReservation.TicketReservationStatus.PENDING;
 import static alfio.model.system.ConfigurationKeys.*;
+import static alfio.util.ReservationUtil.collectTicketsWithCategory;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
 import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.trimToNull;
+import static org.springframework.http.MediaType.APPLICATION_PDF_VALUE;
 
 @Component
-@AllArgsConstructor
-@Log4j2
 public class BillingDocumentManager {
-    private static final String CREDIT_NOTE_NUMBER = "creditNoteNumber";
+
+    private static final Logger log = LoggerFactory.getLogger(BillingDocumentManager.class);
+
+    static final String CREDIT_NOTE_NUMBER = "creditNoteNumber";
     private final BillingDocumentRepository billingDocumentRepository;
     private final Json json;
     private final ConfigurationManager configurationManager;
@@ -65,6 +73,33 @@ public class BillingDocumentManager {
     private final TicketReservationRepository ticketReservationRepository;
     private final ClockProvider clockProvider;
     private final ExtensionManager extensionManager;
+    private final InvoiceSequencesRepository invoiceSequencesRepository;
+
+    public BillingDocumentManager(BillingDocumentRepository billingDocumentRepository,
+                                  Json json,
+                                  ConfigurationManager configurationManager,
+                                  TicketRepository ticketRepository,
+                                  TicketCategoryRepository ticketCategoryRepository,
+                                  OrganizationRepository organizationRepository,
+                                  UserRepository userRepository,
+                                  AuditingRepository auditingRepository,
+                                  TicketReservationRepository ticketReservationRepository,
+                                  ClockProvider clockProvider,
+                                  ExtensionManager extensionManager,
+                                  InvoiceSequencesRepository invoiceSequencesRepository) {
+        this.billingDocumentRepository = billingDocumentRepository;
+        this.json = json;
+        this.configurationManager = configurationManager;
+        this.ticketRepository = ticketRepository;
+        this.ticketCategoryRepository = ticketCategoryRepository;
+        this.organizationRepository = organizationRepository;
+        this.userRepository = userRepository;
+        this.auditingRepository = auditingRepository;
+        this.ticketReservationRepository = ticketReservationRepository;
+        this.clockProvider = clockProvider;
+        this.extensionManager = extensionManager;
+        this.invoiceSequencesRepository = invoiceSequencesRepository;
+    }
 
 
     public Optional<ZonedDateTime> findFirstInvoiceDate(int eventId) {
@@ -79,7 +114,7 @@ public class BillingDocumentManager {
         return !summary.getFree() && (!summary.getNotYetPaid() || (summary.getWaitingForPayment() && ticketReservation.isInvoiceRequested()));
     }
 
-    List<Mailer.Attachment> generateBillingDocumentAttachment(PurchaseContext purchaseContext,
+    public List<Mailer.Attachment> generateBillingDocumentAttachment(PurchaseContext purchaseContext,
                                                               TicketReservation ticketReservation,
                                                               Locale language,
                                                               BillingDocument.Type documentType,
@@ -89,17 +124,15 @@ public class BillingDocumentManager {
         model.put("reservationId", ticketReservation.getId());
         model.put("eventId", purchaseContext.event().map(ev -> Integer.toString(ev.getId())).orElse(null));
         model.put("language", json.asJsonString(language));
-        model.put("reservationEmailModel", json.asJsonString(getOrCreateBillingDocument(purchaseContext, ticketReservation, username, orderSummary).getModel()));
-        switch (documentType) {
-            case INVOICE:
-                return Collections.singletonList(new Mailer.Attachment("invoice.pdf", null, "application/pdf", model, Mailer.AttachmentIdentifier.INVOICE_PDF));
-            case RECEIPT:
-                return Collections.singletonList(new Mailer.Attachment("receipt.pdf", null, "application/pdf", model, Mailer.AttachmentIdentifier.RECEIPT_PDF));
-            case CREDIT_NOTE:
-                return Collections.singletonList(new Mailer.Attachment("credit-note.pdf", null, "application/pdf", model, Mailer.AttachmentIdentifier.CREDIT_NOTE_PDF));
-            default:
-                throw new IllegalStateException(documentType+" is not supported");
-        }
+        model.put("reservationEmailModel", json.asJsonString(internalGetOrCreate(purchaseContext, ticketReservation, username, orderSummary).getModel()));
+        return switch (documentType) {
+            case INVOICE ->
+                Collections.singletonList(new Mailer.Attachment("invoice.pdf", null, APPLICATION_PDF_VALUE, model, Mailer.AttachmentIdentifier.INVOICE_PDF));
+            case RECEIPT ->
+                Collections.singletonList(new Mailer.Attachment("receipt.pdf", null, APPLICATION_PDF_VALUE, model, Mailer.AttachmentIdentifier.RECEIPT_PDF));
+            case CREDIT_NOTE ->
+                Collections.singletonList(new Mailer.Attachment("credit-note.pdf", null, APPLICATION_PDF_VALUE, model, Mailer.AttachmentIdentifier.CREDIT_NOTE_PDF));
+        };
     }
 
     @Transactional
@@ -137,6 +170,10 @@ public class BillingDocumentManager {
 
     @Transactional
     public BillingDocument getOrCreateBillingDocument(PurchaseContext purchaseContext, TicketReservation reservation, String username, OrderSummary orderSummary) {
+        return internalGetOrCreate(purchaseContext, reservation, username, orderSummary);
+    }
+
+    private BillingDocument internalGetOrCreate(PurchaseContext purchaseContext, TicketReservation reservation, String username, OrderSummary orderSummary) {
         Optional<BillingDocument> existing = billingDocumentRepository.findLatestByReservationId(reservation.getId());
         return existing.orElseGet(() -> createBillingDocument(purchaseContext, reservation, username, orderSummary));
     }
@@ -145,14 +182,63 @@ public class BillingDocumentManager {
         return billingDocumentRepository.findById(id);
     }
 
+    @Transactional
+    public Optional<String> generateInvoiceNumber(PaymentSpecification spec, TotalPrice reservationCost) {
+        if(!reservationCost.requiresPayment() || !spec.isInvoiceRequested() || !configurationManager.hasAllConfigurationsForInvoice(spec.getPurchaseContext())) {
+            return Optional.empty();
+        }
+
+        String reservationId = spec.getReservationId();
+        var billingDetails = ticketReservationRepository.getBillingDetailsForReservation(reservationId);
+        var optionalInvoiceNumber = extensionManager.handleInvoiceGeneration(spec, reservationCost, billingDetails, Map.of("organization", organizationRepository.getById(spec.getPurchaseContext().getOrganizationId())))
+            .flatMap(invoiceGeneration -> Optional.ofNullable(trimToNull(invoiceGeneration.getInvoiceNumber())));
+
+        optionalInvoiceNumber.ifPresent(invoiceNumber -> {
+            List<Map<String, Object>> modifications = List.of(Map.of("invoiceNumber", invoiceNumber));
+            auditingRepository.insert(reservationId, null, spec.getPurchaseContext(), EXTERNAL_INVOICE_NUMBER, new Date(), RESERVATION, reservationId, modifications);
+        });
+
+        return optionalInvoiceNumber.or(() -> {
+            int invoiceSequence = invoiceSequencesRepository.lockSequenceForUpdate(spec.getPurchaseContext().getOrganizationId());
+            invoiceSequencesRepository.incrementSequenceFor(spec.getPurchaseContext().getOrganizationId());
+            return Optional.of(formatDocumentNumber(spec.getPurchaseContext(), invoiceSequence));
+        });
+    }
+
+    String generateCreditNoteNumber(PurchaseContext purchaseContext, TicketReservation reservation) {
+
+        return extensionManager.handleCreditNoteGeneration(purchaseContext, reservation.getId(), reservation.getInvoiceNumber(), organizationRepository.getById(purchaseContext.getOrganizationId()))
+            .map(cng -> {
+                var reservationId = reservation.getId();
+                var creditNoteNumber = cng.getCreditNoteNumber();
+                auditingRepository.insert(reservationId, null, purchaseContext, EXTERNAL_CREDIT_NOTE_NUMBER, new Date(), RESERVATION, reservationId, List.of(Map.of(CREDIT_NOTE_NUMBER, creditNoteNumber)));
+                return creditNoteNumber;
+            })
+            .orElseGet(() -> {
+                if (configurationManager.getFor(REUSE_INVOICE_NUMBER_FOR_CREDIT_NOTE, purchaseContext.getConfigurationLevel()).getValueAsBooleanOrDefault()) {
+                    return reservation.getInvoiceNumber();
+                } else {
+                    int creditNoteSequence = invoiceSequencesRepository.lockSequenceForUpdate(purchaseContext.getOrganizationId(), CREDIT_NOTE);
+                    invoiceSequencesRepository.incrementSequenceFor(purchaseContext.getOrganizationId(), CREDIT_NOTE);
+                    return formatDocumentNumber(purchaseContext, creditNoteSequence);
+                }
+            });
+    }
+
+    private String formatDocumentNumber(PurchaseContext purchaseContext, int sequence) {
+        String pattern = configurationManager
+            .getFor(ConfigurationKeys.INVOICE_NUMBER_PATTERN, purchaseContext.getConfigurationLevel())
+            .getValueOrDefault("%d");
+        return String.format(ObjectUtils.firstNonNull(StringUtils.trimToNull(pattern), "%d"), sequence);
+    }
+
     private Map<String, Object> prepareModelForBillingDocument(PurchaseContext purchaseContext, TicketReservation reservation, OrderSummary summary, BillingDocument.Type type) {
         Organization organization = organizationRepository.getById(purchaseContext.getOrganizationId());
 
-        String creditNoteNumber = reservation.getInvoiceNumber();
+        String creditNoteNumber = null;
         if(type == CREDIT_NOTE) {
             // override credit note number
-            creditNoteNumber = extensionManager.handleCreditNoteGeneration(purchaseContext, reservation.getId(), reservation.getInvoiceNumber(), organizationRepository.getById(purchaseContext.getOrganizationId()))
-                .map(CreditNoteGeneration::getCreditNoteNumber).orElse(creditNoteNumber);
+            creditNoteNumber = generateCreditNoteNumber(purchaseContext, reservation);
         }
 
         var bankingInfo = configurationManager.getFor(Set.of(VAT_NR, INVOICE_ADDRESS, BANK_ACCOUNT_NR, BANK_ACCOUNT_OWNER), purchaseContext.getConfigurationLevel());
@@ -164,15 +250,7 @@ public class BillingDocumentManager {
         Map<Integer, List<Ticket>> ticketsByCategory = ticketRepository.findTicketsInReservation(reservation.getId())
             .stream()
             .collect(groupingBy(Ticket::getCategoryId));
-        final List<TicketWithCategory> ticketsWithCategory;
-        if(!ticketsByCategory.isEmpty()) {
-            ticketsWithCategory = ticketCategoryRepository.findByIds(ticketsByCategory.keySet())
-                .stream()
-                .flatMap(tc -> ticketsByCategory.get(tc.getId()).stream().map(t -> new TicketWithCategory(t, tc)))
-                .collect(toList());
-        } else {
-            ticketsWithCategory = Collections.emptyList();
-        }
+        List<TicketWithCategory> ticketsWithCategory = collectTicketsWithCategory(ticketsByCategory, ticketCategoryRepository);
         var reservationShortId = configurationManager.getShortReservationID(purchaseContext, reservation);
         Map<String, Object> model = TemplateResource.prepareModelForConfirmationEmail(organization, purchaseContext, reservation, vat, ticketsWithCategory, summary, "", "", reservationShortId, invoiceAddress, bankAccountNr, bankAccountOwner, Map.of());
         boolean euBusiness = StringUtils.isNotBlank(reservation.getVatCountryCode()) && StringUtils.isNotBlank(reservation.getVatNr())
@@ -183,6 +261,7 @@ public class BillingDocumentManager {
         model.put("publicId", configurationManager.getPublicReservationID(purchaseContext, reservation));
         var additionalInfo = ticketReservationRepository.getAdditionalInfo(reservation.getId());
         model.put("invoicingAdditionalInfo", additionalInfo.getInvoicingAdditionalInfo());
+        model.put("proforma", !additionalInfo.getInvoicingAdditionalInfo().isEmpty());
         model.put("billingDetails", additionalInfo.getBillingDetails());
         if(type == CREDIT_NOTE) {
             model.put(CREDIT_NOTE_NUMBER, creditNoteNumber);
